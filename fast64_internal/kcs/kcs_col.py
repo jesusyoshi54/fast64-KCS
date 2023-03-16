@@ -10,7 +10,7 @@ from pathlib import Path
 from mathutils import Vector, Euler, Matrix
 from collections import namedtuple
 from dataclasses import dataclass, field
-from typing import BinaryIO, TextIO
+from typing import BinaryIO, TextIO, NamedTuple
 
 from .kcs_data import *
 from .kcs_utils import *
@@ -77,21 +77,10 @@ class LevelBinary(MiscBinary):
 
     def decode_node(self, num: int):
         node = BpyNode(num)
-        kirb = namedtuple(
-            "kirb_node",
-            "node EnterEnum w l a DestNode unused shad1 shad2 shad3 unused2 WarpFlag opt1 opt2 opt3 opt4 unused3",
-        )
-        cam = namedtuple(
-            "cam_node",
-            """Profile pad LockX LockY LockZ pad PanHiLo PanLo PanYaw pad pad FocusX FocusY FocusZ
-        NearClip FarClip CamR1 CamR2 CamYaw1 CamYaw2 CamRadius1 CamRadius2 FOV1 FOV2 CamPhi1 CamPhi2
-        CamXLock1 CamXLock2 CamYLock1 CamYLock2 CamZLock1 CamZLock2 CamYawLock1 CamYawLock2 CamPitchLock1 CamPitchLock2""",
-            rename=True,
-        )
         path_node = self.node_header[1] + (num * 16)
         node.path_node = self.upt(path_node, ">3L2H", 16)
-        node.kirb_node = kirb._make(self.upt(node.path_node[0], ">2H4B4B4H2fL", 0x20))
-        node.cam_node = cam._make(self.upt(node.path_node[0] + 0x20, ">10BH25f", 0x70))
+        node.kirb_node = Kirby_Node(*self.unpack_struct(node.path_node[0], Kirby_Settings_Node_Unpack))
+        node.cam_node = Camera_Node(*self.unpack_struct(node.path_node[0] + 0x20, Camera_Node_Unpack))
         node.path_footer = self.upt(node.path_node[1], ">2HfLf2L", 0x18)
         node.num_connections = node.path_node[3]
         node.node_connections = self.upt(
@@ -134,9 +123,45 @@ class ParticleBinary(MiscBinary):
     feature = "particle"
 
 
-# dummy class to be filled in later when c/asm importing works
-class MiscText:
-    pass
+class Kirby_Node(NamedTuple):
+    node: int
+    enter_enum: int
+    stage: tuple[int]
+    pad: int
+    shade: tuple[int]
+    pad2: int
+    flags: int
+    # these are unused props
+    opt1: int
+    opt2: int
+    opt3: float
+    opt4: float
+    pad3: float
+
+
+class Camera_Node(NamedTuple):
+    profile: int
+    pad: int
+    locks: tuple[bool]
+    pad2: int
+    pan_hi_lo: int
+    pan_lo: int
+    pan_yaw: int
+    pad3: int
+    pad4: int
+    focus_pos: tuple[float]
+    near_clip: float
+    far_clip: float
+    phi_rot: tuple[float]
+    theta_rot: tuple[float]
+    radius: tuple[float]
+    fov: tuple[float]
+    y_offset: tuple[float]
+    x_bounds: tuple[float]
+    y_bounds: tuple[float]
+    z_bounds: tuple[float]
+    yaw_bounds: tuple[float]
+    pitch_bounds: tuple[float]
 
 
 # for i/o of node data
@@ -148,27 +173,29 @@ class BpyNode:
         Null = lambda x, y: x * (x != y)
         kcs_cam = cam.data.KCS_cam
         camera_node = self.cam_node
-        kcs_cam.axis_locks = [camera_node.LockX != 0, camera_node.LockY != 0, camera_node.LockZ != 0]
-        kcs_cam.profile_view = camera_node.Profile
+        kcs_cam.axis_locks = [not lock for lock in camera_node.locks]
+        kcs_cam.profile_view = camera_node.profile
         kcs_cam.pan_ahead, kcs_cam.pan_vertical, kcs_cam.pan_below = (
-            camera_node.PanYaw,
-            camera_node.PanHiLo,
-            camera_node.PanLo,
+            camera_node.pan_yaw,
+            camera_node.pan_hi_lo,
+            camera_node.pan_lo,
         )
-        kcs_cam.follow_yaw = (camera_node.CamYaw1, camera_node.CamYaw2)
-        kcs_cam.follow_radius = (camera_node.CamRadius1, camera_node.CamRadius2)
-        kcs_cam.follow_pitch = (camera_node.CamPhi1, camera_node.CamPhi2)
-        kcs_cam.clip_planes = (camera_node.NearClip, camera_node.FarClip)
-        kcs_cam.focus_location = (camera_node.FocusX, camera_node.FocusY, camera_node.FocusZ)
-        kcs_cam.cam_bounds_pitch = (camera_node.CamYawLock1, camera_node.CamYawLock2)
-        kcs_cam.cam_bounds_yaw = (camera_node.CamPitchLock1, camera_node.CamPitchLock2)
-        kcs_cam.cam_bounds_x = (camera_node.CamXLock1, camera_node.CamXLock2)
-        kcs_cam.cam_bounds_y = (camera_node.CamYLock1, camera_node.CamYLock2)
-        kcs_cam.cam_bounds_z = (camera_node.CamZLock1, camera_node.CamZLock2)
+        kcs_cam.follow_yaw = camera_node.theta_rot
+        kcs_cam.follow_radius = camera_node.radius
+        kcs_cam.follow_pitch = camera_node.phi_rot
+        kcs_cam.cam_y_offset = camera_node.y_offset
+        kcs_cam.fov = camera_node.fov
+        kcs_cam.clip_planes = (camera_node.near_clip, camera_node.far_clip)
+        kcs_cam.focus_location = camera_node.focus_pos
+        kcs_cam.cam_bounds_pitch = camera_node.pitch_bounds
+        kcs_cam.cam_bounds_yaw = camera_node.yaw_bounds
+        kcs_cam.cam_bounds_x = camera_node.x_bounds
+        kcs_cam.cam_bounds_y = camera_node.y_bounds
+        kcs_cam.cam_bounds_z = camera_node.z_bounds
         x, y, z = (
-            (Null(camera_node.CamXLock1, 9999) + Null(camera_node.CamXLock2, -9999)) / (2 * scale),
-            (Null(camera_node.CamYLock1, 9999) + Null(camera_node.CamYLock2, -9999)) / (2 * scale),
-            (Null(camera_node.CamZLock1, 9999) + Null(camera_node.CamZLock2, -9999)) / (2 * scale),
+            (Null(camera_node.x_bounds[0], 9999) + Null(camera_node.x_bounds[1], -9999)) / (2 * scale),
+            (Null(camera_node.y_bounds[0], 9999) + Null(camera_node.y_bounds[1], -9999)) / (2 * scale),
+            (Null(camera_node.z_bounds[0], 9999) + Null(camera_node.z_bounds[1], -9999)) / (2 * scale),
         )
         cam.location = Vector((x, y, z)) - cam.parent.location
         vol.scale = (x, z, y)
@@ -224,8 +251,8 @@ class BpyNode:
         # kcs_node.entrance_location = Locations.get(self.kirb_node.EnterEnum >> 0xFF)
         # kcs_node.entrance_action = Actions.get(self.kirb_node.EnterEnum & 0xFF)
         # kcs_node.stage_dest = warp[0:3]
-        kcs_node.warp_node = self.kirb_node.DestNode
-        kcs_node.enable_warp = self.kirb_node.WarpFlag & 1
+        kcs_node.warp_node = self.kirb_node.stage[3]
+        kcs_node.enable_warp = self.kirb_node.flags & 1
 
 
 # interim between bpy props and misc blocks, used for importing and exporting
@@ -268,7 +295,9 @@ class BpyCollision:
             kcs_level.mesh_data.append(self.create_col_mesh(tempObj, root_transform))
         return kcs_level
 
-    def create_entity(self, obj: bpy.types.Object, ent_matrix: Matrix, scale: float, kcs_level: KCS_Level, node_num: int):
+    def create_entity(
+        self, obj: bpy.types.Object, ent_matrix: Matrix, scale: float, kcs_level: KCS_Level, node_num: int
+    ):
         # entities don't need to be rotated to N64 coords
         ent_rotation = ent_matrix.to_euler("XYZ")
         ent_rotation.rotate_axis("X", math.radians(90))
@@ -284,12 +313,12 @@ class BpyCollision:
                 ent_data.eeprom_data,
                 tuple(ent_matrix.translation),
                 tuple(ent_rotation),
-                tuple(ent_matrix.to_scale() / scale)
+                tuple(ent_matrix.to_scale() / scale),
             )
         )
         kcs_level.entities.append(kcs_entity)
         return kcs_entity
-        
+
     def create_node(self, obj: bpy.types.Object, transform: Matrix, scale: float, kcs_level: KCS_Level):
         kcs_node = KCS_Node(obj, transform, scale)
         kcs_level.node_data.append(kcs_node)
@@ -503,6 +532,8 @@ class KCS_Level(BinWrite):
     # BSP uses normal planes to rough in hits, then iterates over
     # a list of triangles with that normal to do mesh detection
     def create_binary_space_partition(self):
+        if not self.triangles:
+            return
         # each cell will have a left and right child.
         # a left child means the children are in front this plane
         # a right child means they're behind the plane
@@ -542,9 +573,9 @@ class KCS_Level(BinWrite):
 
         # create list of cells
         def find_child(seq, cell):
-            if cell.left:
+            if cell.left != 0:
                 find_child(seq, cell.left)
-            if cell.right:
+            if cell.right != 0:
                 find_child(seq, cell.right)
             seq.append(cell)
 
@@ -569,27 +600,35 @@ class KCS_Level(BinWrite):
             cell.normal = self.normals.index(cell.normal)
         self.norm_root = self.norm_cells.index(kcs_cell_root)
 
+    @staticmethod
+    def walk_node_backwards(node_data, kcs_node: KCS_Node, target: int, distance: float):
+        if not kcs_node or kcs_node.node.lock_backward:
+            return (0, 9999.0)
+        if kcs_node.node.prev_node != target and not kcs_node.node.lock_backward:
+            return KCS_Level.walk_node_backwards(
+                node_data, node_data.get(kcs_node.node.prev_node, None), target, distance + kcs_node.node_length
+            )
+        if kcs_node.node.prev_node == target:
+            return (0x80, distance)
+
+    @staticmethod
+    def walk_node_forwards(node_data, kcs_node: KCS_Node, target: int, distance: float):
+        if not kcs_node or kcs_node.node.lock_forward:
+            return (0, 9999.0)
+        if kcs_node.node.next_node != target and not kcs_node.node.lock_forward:
+            return KCS_Level.walk_node_forwards(
+                node_data, node_data.get(kcs_node.node.next_node, None), target, distance + kcs_node.node_length
+            )
+        if kcs_node.node.next_node == target:
+            return (0, distance + kcs_node.node_length)
+
     def create_node_relations(self):
         # sort nodes by node number
         self.node_data = sorted(self.node_data, key=lambda x: x.node_num)
+        node_dict = {node.node_num: node for node in self.node_data}
         # node relations show the distance it takes to get from each node to another node
         # relation index can therefore be found by using the binomial coefficient of (n - 1, k)
-        def walk_node_backwards(self, kcs_node: KCS_Node, target: int, distance: float):
-            if kcs_node.node.lock_backward:
-                return (0, 9999.0)
-            if kcs_node.node.prev_node != target and not kcs_node.node.lock_backward:
-                return walk_node_backwards(self, self.node_data[kcs_node.node.prev_node], target, distance + kcs_node.node_length)
-            if kcs_node.node.prev_node == target:
-                return (0x80, distance)
-        
-        def walk_node_forwards(self, kcs_node: KCS_Node, target: int, distance: float):
-            if kcs_node.node.lock_forward:
-                return (0, 9999.0)
-            if kcs_node.node.next_node != target and not kcs_node.node.lock_forward:
-                return walk_node_forwards(self, self.node_data[kcs_node.node.next_node], target, distance + kcs_node.node_length)
-            if kcs_node.node.next_node == target:
-                return (0, distance + kcs_node.node_length)
-        
+
         # I need ordering so I can't use a set
         def app_unique_list(seq, value):
             if value in seq:
@@ -604,7 +643,11 @@ class KCS_Level(BinWrite):
                     self.node_traversals.append(0)
                 # travel across nodes starting at "node" until "other" is found
                 # if it is not connected, then use 0 as NULL connection
-                direction, distance = res_forward if (res_forward := walk_node_forwards(self, node, j, 0))[1] != 9999.0 else walk_node_backwards(self, node, j, 0)
+                direction, distance = (
+                    res_forward
+                    if (res_forward := KCS_Level.walk_node_forwards(node_dict, node, j, 0))[1] != 9999.0
+                    else KCS_Level.walk_node_backwards(node_dict, node, j, 0)
+                )
                 self.node_traversals.append(direction + app_unique_list(self.node_distances, distance))
 
     # this should try to export in the same order as a default level.c file
@@ -615,14 +658,7 @@ class KCS_Level(BinWrite):
         col_data.write(level_block_includes)
         # level header
         if self.level_header:
-            self.write_dict_struct(
-                self.level_header,
-                LevelHeader,
-                col_data,
-                "LevelHeader",
-                "LvlHeader",
-                static=True
-            )
+            self.write_dict_struct(self.level_header, LevelHeader, col_data, "LevelHeader", "LvlHeader", static=True)
         # collision data
         self.write_arr(
             col_data,
@@ -633,11 +669,17 @@ class KCS_Level(BinWrite):
             length=len(self.vertices),
             ampersand="",
             index="[0]",
-            static=True
+            static=True,
         )
         # triangles, each class has its own export func
         self.write_class_arr(
-            col_data, self.triangles, "CollisionTriangle", "Triangles", length=len(self.triangles), ampersand="", static=True
+            col_data,
+            self.triangles,
+            "CollisionTriangle",
+            "Triangles",
+            length=len(self.triangles),
+            ampersand="",
+            static=True,
         )
         self.write_arr(
             col_data,
@@ -648,13 +690,26 @@ class KCS_Level(BinWrite):
             length=len(self.normals),
             outer_only=1,
             ampersand="",
-            static=True
+            static=True,
         )
         self.write_arr(
-            col_data, "u16", "Tri_Cells", self.tri_cells, self.format_arr, length=len(self.tri_cells), ampersand="", static=True
+            col_data,
+            "u16",
+            "Tri_Cells",
+            self.tri_cells,
+            self.format_arr,
+            length=len(self.tri_cells),
+            ampersand="",
+            static=True,
         )
         self.write_class_arr(
-            col_data, self.norm_cells, "NormalGroup", "Norm_Cells", length=len(self.norm_cells), ampersand="", static=True
+            col_data,
+            self.norm_cells,
+            "NormalGroup",
+            "Norm_Cells",
+            length=len(self.norm_cells),
+            ampersand="",
+            static=True,
         )
         # norml cells
         # dyn geo groups
@@ -663,12 +718,7 @@ class KCS_Level(BinWrite):
         # water normals
         if self.collision_header:
             self.write_dict_struct(
-                self.collision_header,
-                CollisionHeader,
-                col_data,
-                "CollisionHeader",
-                "Col_Header",
-                static=True
+                self.collision_header, CollisionHeader, col_data, "CollisionHeader", "Col_Header", static=True
             )
         # node data, this is done to preserve ordering as the original files are done
         node_c_data = (
@@ -688,7 +738,7 @@ class KCS_Level(BinWrite):
             self.node_traversals,
             self.format_arr,
             length=len(self.node_traversals),
-            static=True
+            static=True,
         )
         self.write_arr(
             traversal_data,
@@ -697,29 +747,16 @@ class KCS_Level(BinWrite):
             self.node_distances,
             self.format_arr,
             length=len(self.node_distances),
-            static=True
+            static=True,
         )
         [col_data.append(dat) for dat in node_c_data]
         # node header
         if self.node_header:
-            self.write_dict_struct(
-                self.node_header,
-                NodeHeader,
-                col_data,
-                "NodeHeader",
-                "NodeHdr",
-                static=True
-            )
+            self.write_dict_struct(self.node_header, NodeHeader, col_data, "NodeHeader", "NodeHdr", static=True)
 
         # entities
         self.write_dict_struct_array(
-            self.entities,
-            EntityStruct,
-            col_data,
-            "Entity",
-            f"Entities",
-            ampersand="",
-            static = True
+            self.entities, EntityStruct, col_data, "Entity", f"Entities", ampersand="", static=True
         )
         if self.entities:
             col_data.write("u32 ent_term = ARR_TERMINATOR;")
@@ -880,16 +917,16 @@ class KCS_Node(BinWrite):
                 0,
                 not cam_node.pan_vertical,
                 not cam_node.pan_below,
-                not cam_node.pan_ahead,
+                cam_node.pan_ahead,
                 0,
                 64,
                 *cam_node.focus_location,
                 *cam_node.clip_planes,
-                (100.0, 100.0),  # radius scale in %
+                cam_node.follow_pitch,  # radius scale in %
                 cam_node.follow_yaw,
                 cam_node.follow_radius,
-                (30.0, 30.0),  # FOV
-                cam_node.follow_pitch,
+                cam_node.fov,  # FOV
+                cam_node.cam_y_offset,
                 cam_node.cam_bounds_x,
                 cam_node.cam_bounds_y,
                 cam_node.cam_bounds_z,
@@ -938,21 +975,19 @@ class KCS_Node(BinWrite):
         # use W for twist or something, so I need to override that, forcing this to be ugly
         self.path_matrix = []
         for point in spline.points:
-            point = point.co
-            point[3] = 1
-            self.path_matrix.append(tuple((transform @ point).xyz))
+            self.path_matrix.append(tuple(apply_transform_spline_pt(transform, point.co)))
         # path relative coords are basis invariant, no transform needed
         spline_length = spline.calc_length()
         first_point = spline.points[0].co
         self.path_bounds = (*((point.co - first_point).length / spline_length for point in spline.points),)
-        self.node_length = spline_length * scale
+        self.node_length = spline_length * scale / 10
         self.path_footer = StructContainer(
             (
                 0,  # has path curl, not implemented
                 len(self.path_matrix),
                 0,  # force, not implemented
                 self.pointer_truty(self.path_matrix),
-                self.node_length / 10,
+                self.node_length,
                 self.pointer_truty(self.path_bounds),
                 0,  # pointer to path curl, not implemented
             )
@@ -981,7 +1016,7 @@ class KCS_Node(BinWrite):
             length=len(self.path_matrix),
             ampersand="",
             index="[0]",
-            static=True
+            static=True,
         )
         self.write_arr(
             path_data,
@@ -991,33 +1026,18 @@ class KCS_Node(BinWrite):
             self.format_arr,
             length=len(self.path_bounds),
             ampersand="",
-            static=True
+            static=True,
         )
         self.write_dict_struct(
-            self.path_footer,
-            Path_Footer,
-            path_data,
-            "PathNodeFooter",
-            f"PathFooter_{self.node_num}",
-            static=True
+            self.path_footer, Path_Footer, path_data, "PathNodeFooter", f"PathFooter_{self.node_num}", static=True
         )
         # kirb data
         kirb_data = KCS_Cdata()
         self.write_dict_struct(
-            self.kirby_node,
-            Kirby_Settings_Node,
-            kirb_data,
-            "KirbyNode",
-            f"KirbyNode_{self.node_num}",
-            static=True
+            self.kirby_node, Kirby_Settings_Node, kirb_data, "KirbyNode", f"KirbyNode_{self.node_num}", static=True
         )
         self.write_dict_struct(
-            self.camera_node,
-            Camera_Node,
-            kirb_data,
-            "CameraNode",
-            f"CamNode_{self.node_num}",
-            static=True
+            self.camera_node, Camera_Node, kirb_data, "CameraNode", f"CamNode_{self.node_num}", static=True
         )
         # connectors
         connector_data = KCS_Cdata()
@@ -1030,19 +1050,226 @@ class KCS_Node(BinWrite):
             length=len(self.node_connector),
             outer_only=1,
             ampersand="",
-            static=True
+            static=True,
         )
         # path headers
         header_data = KCS_Cdata()
         self.write_dict_struct(
-            self.path_header,
-            PathHeader,
-            header_data,
-            "PathNodeHeader",
-            f"PathHeader_{self.node_num}",
-            static=True
+            self.path_header, PathHeader, header_data, "PathNodeHeader", f"PathHeader_{self.node_num}", static=True
         )
         return (path_data, kirb_data, connector_data, KCS_Cdata(), header_data)
+
+
+# for doing calcs during UI updates
+class KCS_Node_Lite:
+    def __init__(self, node: bpy.types.Object, scale: length):
+        self.node = node.data.KCS_node
+        # length scaling here is really just a guess
+        self.node_length = node.data.splines[0].calc_length() * scale / 3
+
+
+# ------------------------------------------------------------------------
+#    Helper Functions
+# ------------------------------------------------------------------------
+
+
+def apply_transform_spline_pt(transform: Matrix, point: Vector):
+    point[3] = 1.0
+    return (transform @ point).xyz
+
+
+# convert FOV to mm sensor/(2*tan(fov/2))
+def calc_focal_from_fov(fov: float, sensor_size: int):
+    return sensor_size / (2 * math.tan(math.radians(fov / 2)))
+
+
+def get_node_distance(target: int, root: bpy.types.Object, scale: float):
+    node_data = {
+        child.data.KCS_node.node_num: KCS_Node_Lite(child, scale) for child in root.children if child.type == "CURVE"
+    }
+    root_node = node_data.get(root.KCS_obj.root_node, None)
+    if not root_node:
+        print(f"could not find root node selected in {root} children")
+    # trivial case
+    if root.KCS_obj.root_node == target:
+        return root_node, 0
+    target_distance = (
+        res_forward
+        if (res_forward := KCS_Level.walk_node_forwards(node_data, root_node, target, 0))[1] != 9999.0
+        else KCS_Level.walk_node_backwards(node_data, root_node, target, 0)
+    )
+
+    return None if target_distance[1] == 9999.0 else (node_data.get(target), target_distance[1])
+
+
+# ------------------------------------------------------------------------
+#    Blender UI Callbacks/Functions
+# ------------------------------------------------------------------------
+
+
+def update_camera_data(cam_prop, context: bpy.types.Context):
+    # context checks
+    camera = context.object
+    if not camera:
+        return
+    node = camera.parent
+    if not node or node.type != "CURVE":
+        return
+    root = node.parent
+    if root.type != "EMPTY" and root.ObjProp.KCS_obj_type != "Collision":
+        print("could not find node root object")
+        return
+    node_num = node.data.KCS_node.node_num
+    scale = context.scene.KCS_scene.scale
+    node_distance = get_node_distance(node_num, root, scale)
+    if not node_distance:
+        print("node is not connected to root node")
+        return
+    # clear out previous animations if on different intervals
+    if camera.data.KCS_cam.animated_node_num != node_num:
+        remove_all_animation(camera)
+        remove_all_animation(camera.data)
+
+    frame_start = int(node_distance[1])
+    resolve_time = int(node_distance[0].node_length)
+    set_camera_data(camera, node.data.KCS_node, frame_start=frame_start, resolve_time=resolve_time)
+    set_node_data(node, camera)
+
+
+# operators disrupt the viewport(?) so this will only update if you click button
+def set_camera_pathing(
+    camera: bpy.types.Object, node: bpy.types.Object, frame_start: int = 120, resolve_time: int = 120
+):
+    with bpy.context.temp_override(object=camera):
+        update_camera_data(camera.data.KCS_cam, bpy.context)
+    set_path_follow(camera, node, frame_start=frame_start, resolve_time=resolve_time)
+    swap_active_camera(camera, frame_start)
+
+
+# set defaults back so users don't break nodes for themselves
+def set_node_data(node: bpy.types.Object, camera: bpy.types.Object):
+    node.data.use_radius = False
+    node.data.dimensions = "2D"
+    node.data.use_path_clamp = True
+    node.data.splines[0].use_cyclic_u = False
+    # set origin to be first point
+    bpy.context.scene.cursor.location = apply_transform_spline_pt(node.matrix_local, node.data.splines[0].points[0].co)
+    with bpy.context.temp_override(object=node, active_object=node):
+        bpy.ops.object.origin_set(type="ORIGIN_CURSOR", center="MEDIAN")
+    camera.matrix_parent_inverse = Matrix()
+
+
+def set_camera_data(camera: bpy.types.Object, kcs_node: KCS_Node, frame_start: int = 0, resolve_time: int = 120):
+    node_num = kcs_node.node_num
+    kcs_cam = camera.data.KCS_cam
+    kcs_cam.animated_node_num = node_num
+    # vertical FOV
+    camera.data.sensor_fit = "VERTICAL"
+    camera.data.sensor_width = 75
+    camera.data.sensor_height = 43
+    camera.data.passepartout_alpha = 0.8
+    camera.data.show_composition_center = True
+
+    scale = bpy.context.scene.KCS_scene.scale
+
+    anim_over_frames(
+        camera.data, "lens", (calc_focal_from_fov(fov, 43) for fov in kcs_cam.fov), resolve_time, frame_start
+    )
+    y_offset = (
+        (y_off - math.cos(math.radians(pitch)) * radius) / scale
+        for y_off, pitch, radius in zip(kcs_cam.cam_y_offset, kcs_cam.follow_pitch, kcs_cam.follow_radius)
+    )
+
+    anim_over_frames(camera, "location", y_offset, resolve_time, frame_start, index=2)
+
+    # decompose based on sin/cos of theta
+    radial_offset = [
+        -math.sin(math.radians(pitch)) * radius / scale
+        for pitch, radius in zip(kcs_cam.follow_pitch, kcs_cam.follow_radius)
+    ]
+
+    anim_over_frames(
+        camera,
+        "location",
+        (math.cos(math.radians(-yaw)) * radius for yaw, radius in zip(kcs_cam.follow_yaw, radial_offset)),
+        resolve_time,
+        frame_start,
+        index=0,
+    )
+    anim_over_frames(
+        camera,
+        "location",
+        (math.sin(math.radians(yaw)) * radius for yaw, radius in zip(kcs_cam.follow_yaw, radial_offset)),
+        resolve_time,
+        frame_start,
+        index=1,
+    )
+
+    anim_over_frames(
+        camera,
+        "rotation_euler",
+        (math.radians(180 - pitch) for pitch in kcs_cam.follow_pitch),
+        resolve_time,
+        frame_start,
+        index=0,
+    )
+    anim_over_frames(
+        camera,
+        "rotation_euler",
+        (math.radians(yaw - 90) for yaw in kcs_cam.follow_yaw),
+        resolve_time,
+        frame_start,
+        index=2,
+    )
+
+
+# idempotent, so if a follow path already exists this will only attempt to animate it
+def set_path_follow(camera: bpy.types.Object, node: bpy.types.Object, frame_start: int = 0, resolve_time: int = 120):
+    follow_path = None
+
+    for constraint in camera.constraints:
+        if constraint.type == "FOLLOW_PATH":
+            follow_path = constraint
+            break
+
+    if not follow_path:
+        follow_path = camera.constraints.new("FOLLOW_PATH")
+        follow_path.up_axis = "UP_Y"
+        follow_path.forward_axis = "FORWARD_Y"
+        follow_path.use_curve_follow = True
+        follow_path.target = node
+
+    # attempt to animate
+    with bpy.context.temp_override(constraint=follow_path, object=camera):
+        bpy.ops.constraint.followpath_path_animate(constraint=follow_path.name, owner="OBJECT")
+
+    # set path animation variables
+    node.data.path_duration = resolve_time
+    node.data.use_path_clamp = True
+
+    # animation operator should make fcurve called 'eval_time'
+    node_fcurve = find_item_from_iterable(node.data.animation_data.action.fcurves, "data_path", "eval_time")
+    if not node_fcurve:
+        print("node animation not found")
+        return
+    # generator should be your first modifier
+    generator = find_item_from_iterable(node_fcurve.modifiers, "type", "GENERATOR")
+    if not generator:
+        print("node action modifier not found")
+        return
+    generator.poly_order = 1
+    generator.coefficients[0] = -frame_start
+
+
+def swap_active_camera(camera: bpy.types.Object, frame: int):
+    former_area = bpy.context.area.type
+    bpy.context.area.type = "DOPESHEET_EDITOR"
+    camera.select_set(True)
+    bpy.context.view_layer.objects.active = camera
+    bpy.ops.anim.change_frame(frame=frame)
+    bpy.ops.marker.add()
+    bpy.ops.marker.camera_bind()
+    bpy.context.area.type = former_area
 
 
 # ------------------------------------------------------------------------

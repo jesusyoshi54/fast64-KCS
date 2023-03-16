@@ -856,7 +856,7 @@ class BpyGeo:
         fModel.tempObj, fModel.allObjs = duplicateHierarchy(self.rt, None, True, 0)
         # make root location 0 so that area is centered on root
         root_transform = transform_mtx_blender_to_n64()
-        
+
         # get all child layouts first
         def loop_children(obj, fModel, depth, transform):
             for child in obj.children:
@@ -1007,7 +1007,7 @@ class KCS_fModel(FModel, BinWrite):
 
     def getRenderMode(self, draw_layer):
         return ("G_RM_AA_ZB_OPA_SURF", "G_RM_AA_ZB_OPA_SURF2")
-    
+
     # overrides of base class
     def addMesh(self, name, namePrefix, drawLayer, isSkinned, contextObj):
         meshName = getFMeshName(name, namePrefix, drawLayer, isSkinned)
@@ -1041,7 +1041,7 @@ class KCS_fModel(FModel, BinWrite):
                 continue
             ly.entry = EntryPoint(ly.ptr, j)
             ly.ptr = ly.add_target(ly.entry, cast="struct EntryPoint *")
-        
+
         # bleed data
         bleed_gfx = BleedGraphics()
         bleed_gfx.bleed_fModel(self, self.meshes)

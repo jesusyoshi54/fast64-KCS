@@ -174,6 +174,9 @@ class NODE_PT_Panel(Panel):
         box.label(text="KCS Node Path/Container")
 
         b = box.box()
+        b_warn = b.box()
+        b_warn.alert = True
+        b_warn.label(text="Do not scale node or camera preview values will become invalid", icon="LIBRARY_DATA_BROKEN")
         b.label(text="Create Entity Linked to this Node")
         b.operator("kcs.add_kcsent")
 
@@ -256,6 +259,8 @@ class CAM_PT_Panel(Panel):
         grid.prop(camera_prop, "follow_yaw")
         grid.prop(camera_prop, "follow_pitch")
         grid.prop(camera_prop, "follow_radius")
+        grid.prop(camera_prop, "cam_y_offset")
+        grid.prop(camera_prop, "fov")
 
         box.prop(camera_prop, "clip_planes")
         box.label(text="Position to focus camera. 9999 focuses on kirby.")
@@ -377,15 +382,17 @@ def draw_Gfx_empty(box: bpy.types.UILayout, context: bpy.types.Context):
     box.label(text="KCS Level Gfx Container")
     box.label(text="Make this object the child of the level empty.")
     box.label(text="Make all gfx meshes children of this empty.")
-    box.operator("kcs.add_kcsblock")
 
 
 def draw_Col_empty(box: bpy.types.UILayout, context: bpy.types.Context):
-    box = box.box()
-    box.label(text="KCS Level Col Container")
-    box.label(text="Make this object the child of the level empty.")
-    box.label(text="Make all Col meshes children of this empty.")
-    box.operator("kcs.add_kcsnode")
+    box2 = box.box()
+    box2.label(text="KCS Level Col Container")
+    box2.label(text="Make this object the child of the level empty.")
+    box2.label(text="Make all Col meshes children of this empty.")
+    box2.operator("kcs.add_kcsnode")
+    box.separator()
+    box.operator("kcs.anim_camera")
+    box.prop(context.object.KCS_obj, "root_node")
 
 
 def draw_Col(box: bpy.types.UILayout, context: bpy.types.Context):

@@ -228,16 +228,41 @@ Camera_Node = {
     0x14: ("f32", "Focus Z pos", ""),
     0x18: ("f32", "Near Clip Plane", ""),
     0x1C: ("f32", "Far Clip Plane", ""),
-    0x20: ("f32", "Cam R Scale[2]", "arr"),
+    0x20: ("f32", "Cam Phi Rot[2]", "arr"),
     0x28: ("f32", "Cam Theta Rot[2]", "arr"),
     0x30: ("f32", "Cam Radius[2]", "arr"),
     0x38: ("f32", "FOV pair[2]", "arr"),
-    0x40: ("f32", "Cam Phi Rot[2]", "arr"),
+    0x40: ("f32", "Cam Y offset[2]", "arr"),
     0x48: ("f32", "Cam X Pos Lock Bounds[2]", "arr"),
     0x50: ("f32", "Cam Y Pos Lock Bounds[2]", "arr"),
     0x58: ("f32", "Cam Z Pos Lock Bounds[2]", "arr"),
     0x60: ("f32", "Cam Yaw Lock Bounds[2]", "arr"),
     0x68: ("f32", "Cam Pitch Lock Bounds[2]", "arr"),
+}
+
+Camera_Node_Unpack = {
+    0x0: (">B", 1),
+    0x1: (">B", 1),
+    0x2: (">3B", 3),
+    0x5: (">B", 1),
+    0x6: (">B", 1),
+    0x7: (">B", 1),
+    0x8: (">B", 1),
+    0x9: (">B", 1),
+    0xA: (">H", 2),
+    0xC: (">3f", 12),
+    0x18: (">f", 4),
+    0x1C: (">f", 4),
+    0x20: (">2f", 8),
+    0x28: (">2f", 8),
+    0x30: (">2f", 8),
+    0x38: (">2f", 8),
+    0x40: (">2f", 8),
+    0x48: (">2f", 8),
+    0x50: (">2f", 8),
+    0x58: (">2f", 8),
+    0x60: (">2f", 8),
+    0x68: (">2f", 8),
 }
 
 
@@ -254,6 +279,21 @@ Kirby_Settings_Node = {
     0x14: ("f32", "opt3", ""),
     0x18: ("f32", "opt4", ""),
     0x1C: ("f32", "pad3", ""),
+}
+
+Kirby_Settings_Node_Unpack = {
+    0x0: (">H", 2),
+    0x2: (">H", 2),
+    0x4: (">4B", 4),
+    0x8: (">B", 1),
+    0x9: (">3B", 3),
+    0xC: (">H", 2),
+    0xE: (">H", 2),
+    0x10: (">H", 2),
+    0x12: (">H", 2),
+    0x14: (">f", 4),
+    0x18: (">f", 4),
+    0x1C: (">f", 4),
 }
 
 

@@ -20,6 +20,7 @@ from bpy.types import PropertyGroup
 from bpy.utils import register_class, unregister_class
 
 from .kcs_data import entity_enum
+from .kcs_col import update_camera_data
 
 # ------------------------------------------------------------------------
 #    UI Callbacks
@@ -151,18 +152,48 @@ class CamProp(PropertyGroup):
     pan_vertical: BoolProperty(name="Pan Vertical", description="Pans Camera in Y axis to follow kirby")
     pan_below: BoolProperty(name="Pan Below", description="Pans Camera in Y axis to follow kirby while falling only")
     profile_view: BoolProperty(name="ProfileView", description="View Kirby From Side")
-    node_num: IntProperty(name="Node Number", description="Number of Curr Node", default=1, min=1)
+    animated_node_num: IntProperty(name="Anim Node Number", description="Node num last animated at", default=0, min=0)
     follow_yaw: FloatVectorProperty(
-        name="Yaw", description="The Theta Rotation from kirby to cam while following", size=2, default=(90.0, 90.0)
+        name="Yaw",
+        description="The Theta Rotation from kirby to cam while following",
+        size=2,
+        default=(90.0, 90.0),
+        update=update_camera_data,
     )
     follow_pitch: FloatVectorProperty(
-        name="Pitch", description="The Phi Rotation from kirby to cam while following", size=2, default=(120.0, 120.0)
+        name="Pitch",
+        description="The Phi Rotation from kirby to cam while following",
+        size=2,
+        default=(100.0, 100.0),
+        update=update_camera_data,
     )
     follow_radius: FloatVectorProperty(
-        name="Radius", description="How far the camera is from kirby while following", size=2, default=(600.0, 600.0)
+        name="Radius",
+        description="How far the camera is from kirby while following",
+        size=2,
+        default=(600.0, 600.0),
+        update=update_camera_data,
+    )
+    cam_y_offset: FloatVectorProperty(
+        name="Y offset",
+        description="Y offset across the node",
+        size=2,
+        default=(120.0, 120.0),
+        update=update_camera_data,
+    )
+    fov: FloatVectorProperty(
+        name="Field of View",
+        description="Field of view over the node",
+        size=2,
+        default=(30.0, 30.0),
+        update=update_camera_data,
     )
     clip_planes: FloatVectorProperty(
-        name="Near/Far Clip", description="Camera Clip Planes", size=2, default=(128.0, 12800.0)
+        name="Near/Far Clip",
+        description="Camera Clip Planes",
+        size=2,
+        default=(128.0, 12800.0),
+        update=update_camera_data,
     )
     focus_location: FloatVectorProperty(
         name="Focus position", description="9999 to not use", size=3, default=(9999.0, 9999.0, 9999.0), max=9999.0
@@ -174,6 +205,7 @@ class CamProp(PropertyGroup):
         min=-9999.0,
         default=(-9999.0, 9999.0),
         size=2,
+        update=update_camera_data,
     )
     cam_bounds_y: FloatVectorProperty(
         name="Y bounds",
@@ -182,6 +214,7 @@ class CamProp(PropertyGroup):
         max=9999.0,
         min=-9999.0,
         default=(-9999.0, 9999.0),
+        update=update_camera_data,
     )
     cam_bounds_z: FloatVectorProperty(
         name="Z bounds",
@@ -190,6 +223,7 @@ class CamProp(PropertyGroup):
         default=(-9999.0, 9999.0),
         max=9999.0,
         min=-9999.0,
+        update=update_camera_data,
     )
     cam_bounds_pitch: FloatVectorProperty(
         name="Pitch bounds",
@@ -198,6 +232,7 @@ class CamProp(PropertyGroup):
         default=(0.0, 359.0),
         max=359.0,
         min=0.0,
+        update=update_camera_data,
     )
     cam_bounds_yaw: FloatVectorProperty(
         name="Yaw bounds",
@@ -206,6 +241,7 @@ class CamProp(PropertyGroup):
         default=(10, 170),
         max=359.0,
         min=0.0,
+        update=update_camera_data,
     )
 
 
@@ -221,7 +257,9 @@ class ColProp(PropertyGroup):
         name="Col Param/Break Condition", description="Collision Param for certain ColTypes", default=0
     )
     warp_num: IntProperty(name="WarpNum", description="Flag for warping", min=0)
-    linked_index: IntProperty(name="Linked Index", description="Used for destructable geometry or other stuff idk", min=0)
+    linked_index: IntProperty(
+        name="Linked Index", description="Used for destructable geometry or other stuff idk", min=0
+    )
 
     @property
     def params(self):
@@ -262,6 +300,7 @@ class ObjProp(PropertyGroup):
             ("Camera Volume", "Camera Volume", ""),
         ],
     )
+    root_node: IntProperty(name="root node", default=0, min=0)
 
 
 # entities

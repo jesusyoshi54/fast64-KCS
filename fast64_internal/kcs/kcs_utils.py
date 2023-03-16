@@ -9,7 +9,7 @@ import os, struct, math, re
 from mathutils import Vector, Euler, Matrix
 from time import time
 from pathlib import Path
-from typing import TextIO, BinaryIO, Sequence
+from typing import TextIO, BinaryIO, Sequence, NamedTuple
 
 from ..utility import (
     rotate_quat_blender_to_n64,
@@ -129,8 +129,18 @@ class StructContainer:
 
 # just a base class that holds some binary processing
 class BinProcess:
-    def upt(self, offset: int, typeString: str, length: int):
-        return struct.unpack(typeString, self.file[offset : offset + length])
+    def upt(self, offset: int, type_string: str, length: int):
+        return struct.unpack(type_string, self.file[offset : offset + length])
+
+    def unpack_struct(self, start: int, struct_dict: dict):
+        buffer = []
+        for offset, (type_string, length) in struct_dict.items():
+            val = struct.unpack(type_string, self.file[start + offset : start + offset + length])
+            if len(val) == 1:
+                buffer.append(val[0])
+            else:
+                buffer.append(val)
+        return buffer
 
     @staticmethod
     def seg2phys(num: int):
@@ -183,7 +193,7 @@ class BinWrite:
 
     # given a symbol with a data type, make an extern and add it
     def add_header(self, file: KCS_Cdata, datType: str, label: str, static=False):
-        var_type = "extern"*(not static) + "static"*(static)
+        var_type = "extern" * (not static) + "static" * (static)
         file.header += f"{var_type} {datType} {label};\n"
 
     # format arr data
@@ -250,8 +260,10 @@ class BinWrite:
         self.ptr_obj(arr, file, f"{ampersand}{name}{index}")
         # create array size initializer, handles everything but outermost dimension
         arr_size_init = "".join([f"[{length}]" for length in reversed(depth)]) * (not outer_only)
-        self.add_header(file, arr_format, f"{name}[{self.write_truthy(length)}]{arr_size_init}", static = static)
-        file.write(f"{arr_format} {self.write_truthy('static '*static)}{name}[{self.write_truthy(length)}]{arr_size_init} = {{\n\t")
+        self.add_header(file, arr_format, f"{name}[{self.write_truthy(length)}]{arr_size_init}", static=static)
+        file.write(
+            f"{arr_format} {self.write_truthy('static '*static)}{name}[{self.write_truthy(length)}]{arr_size_init} = {{\n\t"
+        )
         file.write(arr_insides)
         file.write("\n};\n\n")
 
@@ -274,12 +286,21 @@ class BinWrite:
 
     # write an array of a class with its own to_c method
     def write_class_arr(
-        self, file: "filestream write", class_arr: object, prototype: str, name: str, length=None, ampersand="&", static: bool = False
+        self,
+        file: "filestream write",
+        class_arr: object,
+        prototype: str,
+        name: str,
+        length=None,
+        ampersand="&",
+        static: bool = False,
     ):
         # set symbol if obj is a ptr target
         self.ptr_obj(class_arr, file, f"{ampersand}{name}")
-        self.add_header(file, f"struct {prototype}", f"{name}[{self.write_truthy(length)}]", static = static)
-        file.write(f"{self.write_truthy('static '*static)}struct {prototype} {name}[{self.write_truthy(length)}] = {{\n")
+        self.add_header(file, f"struct {prototype}", f"{name}[{self.write_truthy(length)}]", static=static)
+        file.write(
+            f"{self.write_truthy('static '*static)}struct {prototype} {name}[{self.write_truthy(length)}] = {{\n"
+        )
         [cls.to_c(file) for cls in class_arr]
         file.write("};\n\n")
 
@@ -293,15 +314,15 @@ class BinWrite:
         name: str,
         align="",
         ampersand="&",
-        static: bool = False
+        static: bool = False,
     ):
         # set symbol if obj is a ptr target
         self.ptr_obj(struct_dat, file, f"{ampersand}{name}")
-        self.add_header(file, f"struct {prototype}", name, static = static)
+        self.add_header(file, f"struct {prototype}", name, static=static)
         file.write(f"{self.write_truthy(align)}{self.write_truthy('static '*static)}struct {prototype} {name} = {{\n")
         self.write_dict_struct_contents(struct_dat, struct_format, file, prototype, name, align, ampersand, static)
         file.write("};\n\n")
-        
+
     # write a struct from a python dictionary as an array
     def write_dict_struct_array(
         self,
@@ -313,17 +334,19 @@ class BinWrite:
         align="",
         ampersand="&",
         length: int = 0,
-        static: bool = False
+        static: bool = False,
     ):
         self.ptr_obj(arr_struct_dat, file, f"{ampersand}{name}")
-        self.add_header(file, f"struct {prototype}", f"{name}[{self.write_truthy(length)}]", static = static)
-        file.write(f"{self.write_truthy(align)}{self.write_truthy('static '*static)}struct {prototype} {name}[{self.write_truthy(length)}] = {{\n")
+        self.add_header(file, f"struct {prototype}", f"{name}[{self.write_truthy(length)}]", static=static)
+        file.write(
+            f"{self.write_truthy(align)}{self.write_truthy('static '*static)}struct {prototype} {name}[{self.write_truthy(length)}] = {{\n"
+        )
         for struct_dat in arr_struct_dat:
             file.write("{")
             self.write_dict_struct_contents(struct_dat, struct_format, file, prototype, name, align, ampersand, static)
             file.write("},\n")
         file.write("};\n\n")
-    
+
     def write_dict_struct_contents(
         self,
         struct_dat: object,
@@ -333,7 +356,7 @@ class BinWrite:
         name: str,
         align="",
         ampersand="&",
-        static: bool = False
+        static: bool = False,
     ):
         for x, y, z in zip(struct_format.values(), struct_dat.dat, struct_format.keys()):
             # x is (data type, string name, is arr/ptr etc.)
@@ -369,82 +392,6 @@ class BinWrite:
                 file.write(f"\t/* 0x{z:X} {x[1]}*/\t{{{value}}},\n")
             else:
                 file.write(f"\t/* 0x{z:X} {x[1]}*/\t0x{y:X},\n")
-
-
-
-# singleton for breakable block, I don't think this actually works across sessions
-# I'll probably get rid of this later, not a fan of this structure
-class BreakableBlockDat:
-    _instance = None
-    _Gfx_mat = None
-    _Col_mat = None
-    _Col_Mesh = None
-    _Gfx_Mesh = None
-    _Verts = [
-        (-40.0, -40.0, -40.0),
-        (-40.0, -40.0, 40.0),
-        (-40.0, 40.0, -40.0),
-        (-40.0, 40.0, 40.0),
-        (40.0, -40.0, -40.0),
-        (40.0, -40.0, 40.0),
-        (40.0, 40.0, -40.0),
-        (40.0, 40.0, 40.0),
-    ]
-    _GfxTris = [
-        (1, 2, 0),
-        (3, 6, 2),
-        (7, 4, 6),
-        (5, 0, 4),
-        (6, 0, 2),
-        (3, 5, 7),
-        (1, 3, 2),
-        (3, 7, 6),
-        (7, 5, 4),
-        (5, 1, 0),
-        (6, 4, 0),
-        (3, 1, 5),
-    ]
-    _ColTris = [(3, 6, 2), (5, 0, 4), (6, 0, 2), (3, 5, 7), (3, 7, 6), (5, 1, 0), (6, 4, 0), (3, 1, 5)]
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = cls
-        return cls._instance
-
-    def Instance_Col(self):
-        if self._Col_Mesh:
-            return self._Col_Mesh
-        else:
-            self._Col_Mesh = bpy.data.meshes.new("KCS Block Col")
-            self._Col_Mesh.from_pydata(self._Verts, [], self._ColTris)
-            return self._Col_Mesh
-
-    def Instance_Gfx(self):
-        if self._Gfx_Mesh:
-            return self._Gfx_Mesh
-        else:
-            self._Gfx_Mesh = bpy.data.meshes.new("KCS Block Gfx")
-            self._Gfx_Mesh.from_pydata(self._Verts, [], self._GfxTris)
-            return self._Gfx_Mesh
-
-    def Instance_Mat_Gfx(self, obj: bpy.types.Object):
-        if self._Gfx_mat:
-            return self._Gfx_mat
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.create_f3d_mat()
-        self._Gfx_mat = self._Gfx_Mesh.materials[-1]
-        self._Gfx_mat.f3d_mat.combiner1.D = "TEXEL0"
-        self._Gfx_mat.f3d_mat.combiner1.D_alpha = "1"
-        return self._Gfx_mat
-
-    def Instance_Mat_Col(self, obj: bpy.types.Object):
-        if self._Col_mat:
-            return self._Col_mat
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.create_f3d_mat()
-        self._Col_mat = self._Col_Mesh.materials[-1]
-        self._Col_mat.KCS_col.ColType = 9
-        return self._Col_mat
 
 
 # ------------------------------------------------------------------------
@@ -534,8 +481,79 @@ def BANK_INDEX(args: any):
 
 
 # ------------------------------------------------------------------------
+#    Animations/Fcurves
+# ------------------------------------------------------------------------
+
+
+class KeyFrame(NamedTuple):
+    value: int
+    frame: int
+
+
+# base_obj can be any object, not just blender objects
+# the data path for animation data is different for "data" data blocks (like camera) than
+# for "object" data blocks (like the camera object), be specific on the base data block used
+def get_or_create_fcurve(
+    base_obj: object, data_path: str, anim_name: str = "kcs_anim", index: int = 0, get_only: bool = False
+):
+    # idempotent function, returns existing one if none exist
+    try:
+        anim_data = base_obj.animation_data_create()
+    except:
+        print(f"you tried to create anim data for {base_obj} which does not support animation")
+        return
+    if not anim_data.action:
+        if get_only:
+            return None
+        anim_data.action = bpy.data.actions.new(name=anim_name)
+    # search for fcurves at our data path, if none, create a new one
+    for fcurve in anim_data.action.fcurves:
+        if fcurve.data_path == data_path and fcurve.array_index == index:
+            return fcurve
+    if get_only:
+        return None
+    else:
+        return anim_data.action.fcurves.new(data_path, index=index)
+
+
+def remove_all_animation(base_obj: object):
+    try:
+        base_obj.animation_data.action = None
+    except:
+        print(f"you tried to remove anim data for {base_obj} which does not support animation or has no animation data")
+        return
+
+
+def remove_fcurve(base_obj: object, data_path: str, index: int = 0):
+    fcurve = get_or_create_fcurve(base_obj, data_path, index=index, get_only=True)
+    if fcurve:
+        base_obj.animation_data.action.fcurves.remove(fcurve)
+
+
+# this will take no precautions for existing keyframes unless they are on the same frame
+# so if that is an issue remove the old keyframes first
+def insert_keyframes(fcurve, keyframes: list[KeyFrame]):
+    for key in keyframes:
+        keyframe = fcurve.keyframe_points.insert(frame=key.frame, value=key.value)
+        keyframe.interpolation = "LINEAR"
+
+
+def anim_over_frames(base_obj: object, data_path: str, keys: list, step: int, start: int, index=0):
+    fcurve = get_or_create_fcurve(base_obj, data_path, index=index)
+    insert_keyframes(fcurve, (KeyFrame(key, start + i * step) for i, key in enumerate(keys)))
+
+
+# ------------------------------------------------------------------------
 #    Helper Functions
 # ------------------------------------------------------------------------
+
+# given an iterable, this searches for an item that has a certain marking
+# attribute, returns None if not found
+def find_item_from_iterable(iterable: Sequence, attr: str, value: object):
+    for item in iterable:
+        if getattr(item, attr, None) == value:
+            return item
+    return None
 
 
 def is_arr(val):

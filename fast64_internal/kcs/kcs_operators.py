@@ -8,10 +8,10 @@ from bpy.utils import register_class, unregister_class
 from pathlib import Path
 
 from .kcs_gfx import import_geo_bin, export_geo_c
-from .kcs_col import add_node, import_col_bin, export_col_c
-from .kcs_utils import parse_stage_table
+from .kcs_col import add_node, import_col_bin, export_col_c, set_camera_pathing, get_node_distance
+from .kcs_utils import parse_stage_table, make_empty, find_item_from_iterable
 
-from ..utility import PluginError
+from ..utility import PluginError, parentObject
 
 # ------------------------------------------------------------------------
 #    IO Operators
@@ -112,7 +112,7 @@ class KCS_Export(Operator):
         scene = context.scene.KCS_scene
         if scene.file_format == "binary":
             raise PluginError("Binary exports are not supported")
-        
+
         stage_table = Path(scene.decomp_path) / "data" / "kirby.066630.2.c"  # this will probably change later
         stage = parse_stage_table(*scene.export_stage.stage, stage_table)
 
@@ -128,32 +128,32 @@ class KCS_Export(Operator):
                 break
         if not level_obj:
             raise PluginError('Obj is not Empty with type "Level"')
-        
+
         geo_obj, col_obj = None, None
-        
+
         for child in level_obj.children:
             if child.KCS_obj.KCS_obj_type == "Graphics":
                 geo_obj = child
             if child.KCS_obj.KCS_obj_type == "Collision":
                 col_obj = child
-        
+
         if not col_obj:
             raise PluginError('Object with type "Collision" not a child of Level Root')
         if not geo_obj:
             raise PluginError('Object with type "Graphics" not a child of Level Root')
-        
+
         # export geo
         file_gfx = Path(scene.decomp_path) / "assets" / "geo" / (f"bank_{gfx_bank}") / (f"{gfx_ID}")
         file_gfx.mkdir(exist_ok=True, parents=True)
         name = file_gfx / "geo"
         export_geo_c(name, geo_obj, context)
-        
+
         # export col
         file_col = Path(scene.decomp_path) / "assets" / "misc" / (f"bank_{col_bank}") / (f"{col_ID}")
         file_col.mkdir(exist_ok=True, parents=True)
         name = file_col / "level"
         export_col_c(name, col_obj, context)
-        
+
         level_obj.select_set(True)
         bpy.context.view_layer.objects.active = level_obj
         return {"FINISHED"}
@@ -219,45 +219,6 @@ class KCS_Export_Col(Operator):
 # these operators are added to panels to make things easier for the users
 # their purpose is to aid in level creation
 
-# add a star block object and link it to the context object
-# cube has side length of 40
-class KCS_Add_Block(Operator):
-    bl_label = "Add Breakable Block"
-    bl_idname = "kcs.add_kcsblock"
-
-    def execute(self, context: bpy.types.Context):
-        # context vars
-        scale = bpy.context.scene.KCS_scene.scale
-        Rt = context.object
-        collection = context.object.users_collection[0]
-        # get singleton instance of block data
-        Block = BreakableBlockDat()
-        BlockGfxDat = Block.Instance_Gfx(Block)
-        BlockColDat = Block.Instance_Col(Block)
-        BlockGfxObj = bpy.data.objects.new("KCS Block Gfx", BlockGfxDat)
-        BlockColObj = bpy.data.objects.new("KCS Block Col", BlockColDat)
-
-        # link parent and transform
-        collection.objects.link(BlockGfxObj)
-        Parent(Rt, BlockGfxObj, 0)
-        BlockGfxObj.matrix_world *= scale
-        BlockGfxObj.KCS_mesh.MeshType = "Graphics"
-
-        collection.objects.link(BlockColObj)
-        Parent(BlockGfxObj, BlockColObj, 0)
-        BlockColObj.matrix_world *= scale
-        BlockColObj.KCS_mesh.MeshType = "Collision"
-        BlockColObj.KCS_mesh.ColMeshType = "Breakable"
-
-        # setup mats
-        Block.Instance_Mat_Gfx(Block, BlockGfxObj)
-        Block.Instance_Mat_Col(Block, BlockColObj)
-
-        Rt.select_set(True)
-        bpy.context.view_layer.objects.active = Rt
-        return {"FINISHED"}
-
-
 # adds a level empty with the hierarchy setup needed to have one basic node
 class KCS_Add_Level(Operator):
     bl_label = "Add Level Empty"
@@ -269,10 +230,10 @@ class KCS_Add_Level(Operator):
         Lvl.KCS_obj.KCS_obj_type = "Level"
         Col = make_empty("KCS Level Col", "PLAIN_AXES", collection)
         Col.KCS_obj.KCS_obj_type = "Collision"
-        Parent(Lvl, Col, 0)
+        parentObject(Lvl, Col, 0)
         Gfx = make_empty("KCS Level Gfx", "PLAIN_AXES", collection)
         Gfx.KCS_obj.KCS_obj_type = "Graphics"
-        Parent(Lvl, Gfx, 0)
+        parentObject(Lvl, Gfx, 0)
         # Make Node
         PathData = bpy.data.curves.new("KCS Path Node", "CURVE")
         PathData.splines.new("POLY")
@@ -281,16 +242,16 @@ class KCS_Add_Level(Operator):
             s.co = (i - 2, 0, 0, 0)
         Node = bpy.data.objects.new("KCS Node", PathData)
         collection.objects.link(Node)
-        Parent(Col, Node, 0)
+        parentObject(Col, Node, 0)
         # make camera
         CamDat = bpy.data.cameras.new("KCS Node Cam")
         CamObj = bpy.data.objects.new("KCS Node Cam", CamDat)
         collection.objects.link(CamObj)
-        Parent(Node, CamObj, 0)
+        parentObject(Node, CamObj, 0)
         # Make Camera Volume
         Vol = make_empty("KCS Cam Volume", "CUBE", collection)
         Vol.KCS_obj.KCS_obj_type = "Camera Volume"
-        Parent(CamObj, Vol, 0)
+        parentObject(CamObj, Vol, 0)
         Lvl.select_set(True)
         return {"FINISHED"}
 
@@ -307,6 +268,26 @@ class KCS_Add_Node(Operator):
         return {"FINISHED"}
 
 
+# adds animation to cameras to follow paths
+class KCS_Animate_Nodes(Operator):
+    bl_label = "Animate Camera"
+    bl_idname = "kcs.anim_camera"
+
+    def execute(self, context: bpy.types.Context):
+        col_root = context.object
+        for child in col_root.children:
+            if child.type == "CURVE":
+                camera = find_item_from_iterable(child.children, "type", "CAMERA")
+                node_distance = get_node_distance(child.data.KCS_node.node_num, col_root, context.scene.KCS_scene.scale)
+                if node_distance:
+                    frame_start = int(node_distance[1])
+                    resolve_time = int(node_distance[0].node_length)
+                    if frame_start + resolve_time > context.scene.frame_end:
+                        context.scene.frame_end = frame_start + resolve_time
+                    set_camera_pathing(camera, child, frame_start=frame_start, resolve_time=resolve_time)
+        return {"FINISHED"}
+
+
 # adds an entity to the collision parent
 class KCS_Add_Ent(Operator):
     bl_label = "Add Entity"
@@ -318,7 +299,7 @@ class KCS_Add_Ent(Operator):
         collection = context.object.users_collection[0]
         collection.objects.link(obj)
         obj.KCS_obj.KCS_obj_type = "Entity"
-        Parent(context.object, obj, 0)
+        parentObject(context.object, obj, 0)
         obj.location = context.object.data.splines[0].points[0].co.xyz + context.object.location
         return {"FINISHED"}
 
@@ -358,9 +339,9 @@ kcs_operators = (
     KCS_Export_Col,
     KCS_Import_Stage,
     KCS_Add_Level,
-    KCS_Add_Block,
     KCS_Add_Ent,
     KCS_Add_Node,
+    KCS_Animate_Nodes,
     KCS_Import_NLD_Gfx,
     KCS_Import_Col,
     KCS_Add_Tex,
