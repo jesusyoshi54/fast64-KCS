@@ -211,7 +211,7 @@ PathHeader = {
 }
 
 
-Camera_Node = {
+Camera_Node_Export = {
     0x0: ("u8", "Profile View", ""),
     0x1: ("u8", "Unused", ""),
     0x2: ("u8", "Lock H pos", ""),

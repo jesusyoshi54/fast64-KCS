@@ -1037,7 +1037,7 @@ class KCS_Node(BinWrite):
             self.kirby_node, Kirby_Settings_Node, kirb_data, "KirbyNode", f"KirbyNode_{self.node_num}", static=True
         )
         self.write_dict_struct(
-            self.camera_node, Camera_Node, kirb_data, "CameraNode", f"CamNode_{self.node_num}", static=True
+            self.camera_node, Camera_Node_Export, kirb_data, "CameraNode", f"CamNode_{self.node_num}", static=True
         )
         # connectors
         connector_data = KCS_Cdata()
