@@ -27,7 +27,6 @@ def remove_driver(block_object, data_object, prop_path, index: int = -1):
         if driver:
             data_object.driver_remove(prop_path, index)
 
-
 # here are some generics for getting commonly used drivers and values
 def get_tex_field_driver(material: bpy.types.Material, desired_group: str, tile_path: str):
     return get_or_add_driver(
@@ -43,7 +42,6 @@ def get_tile_scroll_values(tex: TextureProperty, s: bool = False, t: bool = Fals
         return (tex.tile_scroll.s, tex.tile_scroll.interval, tex.S.low)
     else:
         return (tex.tile_scroll.t, tex.tile_scroll.interval, tex.T.low)
-
 
 # and here are some generic functions for setting drivers to an easy value
 

@@ -1420,7 +1420,9 @@ def set_texture_settings_node(material: bpy.types.Material):
 
     desired_group = bpy.data.node_groups["TextureSettings_Lite"]
     if (material.f3d_mat.tex0.tex and not material.f3d_mat.tex0.autoprop) or (
-        material.f3d_mat.tex1.tex and not material.f3d_mat.tex1.autoprop
+        material.f3d_mat.tex1.tex and not material.f3d_mat.tex1.autoprop or 
+        material.f3d_mat.tex0.has_tile_scroll or
+        material.f3d_mat.tex1.has_tile_scroll
     ):
         desired_group = bpy.data.node_groups["TextureSettings_Advanced"]
     if textureSettings.node_tree is not desired_group:
@@ -2043,29 +2045,34 @@ def update_tex_drivers(self: bpy.types.Property, context: bpy.types.Context):
     with F3DMaterial_UpdateLock(get_material_from_context(context)) as material:
         if not material:
             return
+        set_texture_settings_node(material)
         node_group = "TextureSettings"
         # if it is in auto prop, the path changes, so delete the old drivers because things get mapped to the same input socket, even if it is a different value
-        if (material.f3d_mat.tex0.tex and not material.f3d_mat.tex0.autoprop) or (
-            material.f3d_mat.tex1.tex and not material.f3d_mat.tex1.autoprop
-        ):
-            # auto prop off
-            remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 S Mask"], "default_value")
-            remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 T Mask"], "default_value")
+        if (material.f3d_mat.tex0.has_tile_scroll or material.f3d_mat.tex1.has_tile_scroll):
+            # check if scroll exists
+            if material.f3d_mat.tex0.tex:
+                driver_s_0 = get_tex_field_driver(material, node_group, "0 S Low")
+                update_driver_on_interval(driver_s_0.driver, *get_tile_scroll_values(material.f3d_mat.tex0, s = True))
+                driver_t_0 = get_tex_field_driver(material, node_group, "0 T Low")
+                update_driver_on_interval(driver_t_0.driver, *get_tile_scroll_values(material.f3d_mat.tex0, t = True))
+            if material.f3d_mat.tex1.tex:
+                driver_s_1 = get_tex_field_driver(material, node_group, "1 S Low")
+                update_driver_on_interval(driver_s_1.driver, *get_tile_scroll_values(material.f3d_mat.tex1, s = True))
+                driver_t_1 = get_tex_field_driver(material, node_group, "1 T Low")
+                update_driver_on_interval(driver_t_1.driver, *get_tile_scroll_values(material.f3d_mat.tex1, t = True))
         else:
-            # auto prop on
+            # vals can be high if auto prop is off, and TextureSettingsLite node is used
+            remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 S Low"], "default_value")
+            remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 T Low"], "default_value")
             remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 S High"], "default_value")
             remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 T High"], "default_value")
-        # check if scroll exists
-        if material.f3d_mat.tex0.tex:
-            driver_s_0 = get_tex_field_driver(material, node_group, "0 S Low")
-            update_driver_on_interval(driver_s_0.driver, *get_tile_scroll_values(material.f3d_mat.tex0, s = True))
-            driver_t_0 = get_tex_field_driver(material, node_group, "0 T Low")
-            update_driver_on_interval(driver_t_0.driver, *get_tile_scroll_values(material.f3d_mat.tex0, t = True))
-        if material.f3d_mat.tex1.tex:
-            driver_s_1 = get_tex_field_driver(material, node_group, "1 S Low")
-            update_driver_on_interval(driver_s_1.driver, *get_tile_scroll_values(material.f3d_mat.tex1, s = True))
-            driver_t_1 = get_tex_field_driver(material, node_group, "1 T Low")
-            update_driver_on_interval(driver_t_1.driver, *get_tile_scroll_values(material.f3d_mat.tex1, t = True))
+            # set values back to default
+            tex_0 = material.f3d_mat.tex0
+            material.node_tree.nodes[node_group].inputs["0 S Low"].default_value = trunc_10_2(tex_0.S.low)
+            material.node_tree.nodes[node_group].inputs["0 T Low"].default_value = trunc_10_2(tex_0.T.low)
+            tex_1 = material.f3d_mat.tex1
+            material.node_tree.nodes[node_group].inputs["1 S Low"].default_value = trunc_10_2(tex_1.S.low)
+            material.node_tree.nodes[node_group].inputs["1 T Low"].default_value = trunc_10_2(tex_1.T.low)
 
 
 def toggle_auto_prop(self, context: bpy.types.Context):
@@ -2131,6 +2138,10 @@ class SetTileSizeScrollProperty(bpy.types.PropertyGroup):
     t: bpy.props.IntProperty(min=-4095, max=4095, default=0, update=update_tex_drivers)
     interval: bpy.props.IntProperty(min=1, soft_max=1000, default=1, update=update_tex_drivers)
 
+    @property
+    def has_scroll(self):
+        return self.s or self.t
+    
     def key(self):
         return (self.s, self.t, self.interval)
 
@@ -2195,6 +2206,10 @@ class TextureProperty(bpy.types.PropertyGroup):
     )
     tile_scroll: bpy.props.PointerProperty(type=SetTileSizeScrollProperty)
 
+    @property
+    def has_tile_scroll(self):
+        return self.tex and self.tile_scroll.has_scroll
+    
     def get_tex_size(self) -> list[int]:
         if self.tex or self.use_tex_reference:
             if self.tex is not None:
