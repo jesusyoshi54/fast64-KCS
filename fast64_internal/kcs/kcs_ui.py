@@ -45,6 +45,7 @@ class KCS_PROP_PT_Panel(Panel):
         layout.label(text="Import Options")
         row = layout.row()
         row.prop(KCS_scene, "clean_up")
+        row.prop(KCS_scene, "use_collections")
         layout.operator("kcs.add_kcslevel")
 
 

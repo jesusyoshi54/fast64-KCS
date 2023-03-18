@@ -88,7 +88,7 @@ class LevelBinary(MiscBinary):
         )
         node.is_loop = node.path_node[4]
         self.path_nodes[num] = node
-        node.path_matrix = [self.upt(node.path_footer[3] + 12 * i, ">3f", 12) for i in range(node.path_footer[1])]
+        node.path_matrix = [self.upt(node.path_footer[3] + 12 * i, ">3f", 12) for i in range(node.path_footer[1] + (node.path_footer[0] >> 8))]
 
     def decode_col(self):
         tri_num = self.col_header[1]
@@ -169,7 +169,8 @@ class BpyNode:
     def __init__(self, num: int):
         self.index = num
 
-    def cam_imp(self, cam: bpy.types.Camera, vol: bpy.types.Object, scale: float):
+    def cam_imp(self, cam: bpy.types.Camera, scale: float):
+        # vol = cam.children[0] # not sure if I want to use this or not
         Null = lambda x, y: x * (x != y)
         kcs_cam = cam.data.KCS_cam
         camera_node = self.cam_node
@@ -198,35 +199,40 @@ class BpyNode:
             (Null(camera_node.z_bounds[0], 9999) + Null(camera_node.z_bounds[1], -9999)) / (2 * scale),
         )
         cam.location = Vector((x, y, z)) - cam.parent.location
-        vol.scale = (x, z, y)
+        # if all(kcs_cam.axis_locks):
+            # bpy.data.objects.remove(vol)
+        # else:
+            # vol.scale = (x, z, y)
 
     def path_imp(self, path: bpy.types.Object, scale: float):
         kcs_node = path.data.KCS_node
-        kcs_node.node_num = self.index + 1
+        kcs_node.node_num = self.index
         if self.num_connections == 1:
-            kcs_node.next_node = self.node_connections[2] + 1
-            kcs_node.prev_node = self.node_connections[2] + 1
+            kcs_node.next_node = self.node_connections[2]
+            kcs_node.prev_node = self.node_connections[2]
             kcs_node.lock_backward = self.node_connections[0] != 0
             kcs_node.lock_forward = self.node_connections[3] == 0
         elif self.num_connections == 2:
-            kcs_node.next_node = self.node_connections[2] + 1
-            kcs_node.prev_node = self.node_connections[6] + 1
+            kcs_node.prev_node = self.node_connections[2]
+            kcs_node.next_node = self.node_connections[6]
             kcs_node.lock_backward = self.node_connections[0] != 0
             kcs_node.lock_forward = self.node_connections[4] == 0
         num_pts = self.path_footer[1]
         path.data.splines.remove(path.data.splines[0])
-        sp = path.data.splines.new("POLY")
-        sp.points.add(num_pts - 1)
-        first = self.path_matrix[0]
-        path.location = [
-            f / scale for f in (first[0], -first[2], first[1])
-        ]  # rotation is not applied to location so I have to manually swap coords
-        for i, s in enumerate(sp.points):
-            coord = self.path_matrix[i]
-            s.co = [*[(f - a) / scale for f, a in zip(coord, first)], 0]
+        spline = path.data.splines.new("POLY")
+        spline.points.add(num_pts - 1)
+        # if there is curl, the first and last points become "handles" of a sort
+        # so the coord points become the middle ones
+        path_coords = self.path_matrix if not self.path_footer[0] & 0x200 else self.path_matrix[1:-1]
+        first = Vector(path_coords[0])
+        print(path_coords)
+        path.location = (transform_mtx_blender_to_n64().inverted() @ (Vector(first)/scale).to_4d()).xyz
+        for path_pt, spline_pt in zip(path_coords, spline.points):
+            shifted_pt = (Vector(path_pt) - first) / scale
+            spline_pt.co = transform_mtx_blender_to_n64().inverted() @ Vector(shifted_pt).to_4d()
         # warps
-        shade = self.kirb_node[6:10]  # not implemented yet
-        warp = self.kirb_node[2:6]
+        # shade = self.kirb_node[6:10]  # not implemented yet
+        # warp = self.kirb_node[2:6]
         # flag values to enums
         Locations = {
             0: "walk start",
@@ -379,9 +385,8 @@ class BpyCollision:
             # paths cannot have rotations applied
             path.rotation_euler = rotate_quat_n64_to_blender(path.rotation_quaternion).to_euler("XYZ")
             cam = path.children[0]
-            vol = cam.children[0]
             node.path_imp(path, scale)
-            node.cam_imp(cam, vol, scale)
+            node.cam_imp(cam, scale)
             node.bpy_path = path
         # update view layer so that paths have accurate positions
         bpy.context.view_layer.update()
@@ -432,27 +437,36 @@ class BpyCollision:
             triangles.append(tri)
         return (self.scale_verts(verts, scale), (), triangles, mat_dat)
 
-    def write_mats(self, obj: bpy.types.Object, dat: tuple):
-        polys = obj.data.polygons
-        mats = set()
+    def write_mats(self, obj: bpy.types.Object, kcs_triangles: tuple):
+        def hash_to_color_reg(value, shift):
+            return ((value >> 16*shift) & 0xFFFF) / 0xFFFF
         mat_dict = dict()
-        for p, t in zip(polys, dat):
-            if t[9] == 8:
-                warp = t[5]
+        for polygon, kcs_tri in zip(obj.data.polygons, kcs_triangles):
+            if kcs_tri[9] == 8:
+                warp = kcs_tri[5]
             else:
                 warp = 0
-            mat = (t[4], t[9], t[8], warp)
-            if mat not in mats:
-                mats.add(mat)
-                bpy.data.materials.new("kcs mat")
-                mat_dict[mat] = (len(bpy.data.materials), len(mat_dict))
-                material = bpy.data.materials[-1]
-                obj.data.materials.append(material)
-                material.KCS_col.norm_type = t[4]
-                material.KCS_col.col_type = t[9]
-                material.KCS_col.col_param = t[8]
+            mat = (kcs_tri[4], kcs_tri[9], kcs_tri[8], warp)
+            if mat not in mat_dict:
+                material = bpy.data.materials.new("kcs mat")
+                material.KCS_col.norm_type = kcs_tri[4]
+                material.KCS_col.col_type = kcs_tri[9]
+                material.KCS_col.col_param = kcs_tri[8]
                 material.KCS_col.warp_num = warp
-            p.material_index = mat_dict[mat][1]
+                # set display settings to make it easy to see
+                color = hash(mat)
+                material.diffuse_color = (
+                    hash_to_color_reg(color, 0),
+                    hash_to_color_reg(color, 1),
+                    hash_to_color_reg(color, 2),
+                    1
+                )
+                # only backface culling is an option
+                if kcs_tri[4] & 2 == 0:
+                    material.use_backface_culling = True
+                mat_dict[mat] = len(obj.data.materials)
+                obj.data.materials.append(material)
+            polygon.material_index = mat_dict[mat]
 
 
 # The entire export, says level but could be a full misc block or just a collision block
@@ -601,24 +615,40 @@ class KCS_Level(BinWrite):
         self.norm_root = self.norm_cells.index(kcs_cell_root)
 
     @staticmethod
-    def walk_node_backwards(node_data, kcs_node: KCS_Node, target: int, distance: float):
+    def walk_node_backwards(node_data, kcs_node: KCS_Node, target: int, distance: float, visited_nodes: set = None):
+        if not visited_nodes:
+            visited_nodes = set()
         if not kcs_node or kcs_node.node.lock_backward:
             return (0, 9999.0)
         if kcs_node.node.prev_node != target and not kcs_node.node.lock_backward:
-            return KCS_Level.walk_node_backwards(
-                node_data, node_data.get(kcs_node.node.prev_node, None), target, distance + kcs_node.node_length
-            )
+            # prevent loops
+            if kcs_node.node.prev_node not in visited_nodes:
+                visited_nodes.add(kcs_node.node.prev_node)
+                return KCS_Level.walk_node_backwards(
+                    node_data, node_data.get(kcs_node.node.prev_node, None), target, distance + kcs_node.node_length, visited_nodes
+                )
+            else:
+                print(f"node loop detected, see path{visited_nodes}")
+                return (0, 9999.0)
         if kcs_node.node.prev_node == target:
             return (0x80, distance)
 
     @staticmethod
-    def walk_node_forwards(node_data, kcs_node: KCS_Node, target: int, distance: float):
+    def walk_node_forwards(node_data, kcs_node: KCS_Node, target: int, distance: float, visited_nodes: set = None):
+        if not visited_nodes:
+            visited_nodes = set()
         if not kcs_node or kcs_node.node.lock_forward:
             return (0, 9999.0)
         if kcs_node.node.next_node != target and not kcs_node.node.lock_forward:
-            return KCS_Level.walk_node_forwards(
-                node_data, node_data.get(kcs_node.node.next_node, None), target, distance + kcs_node.node_length
-            )
+            # prevent loops
+            if kcs_node.node.next_node not in visited_nodes:
+                visited_nodes.add(kcs_node.node.next_node)
+                return KCS_Level.walk_node_forwards(
+                    node_data, node_data.get(kcs_node.node.next_node, None), target, distance + kcs_node.node_length, visited_nodes
+                )
+            else:
+                print(f"node loop detected, see path{visited_nodes}")
+                return (0, 9999.0)
         if kcs_node.node.next_node == target:
             return (0, distance + kcs_node.node_length)
 
@@ -1065,7 +1095,7 @@ class KCS_Node_Lite:
     def __init__(self, node: bpy.types.Object, scale: length):
         self.node = node.data.KCS_node
         # length scaling here is really just a guess
-        self.node_length = node.data.splines[0].calc_length() * scale / 3
+        self.node_length = node.data.splines[0].calc_length() * scale / 4
 
 
 # ------------------------------------------------------------------------
@@ -1111,9 +1141,11 @@ def update_camera_data(cam_prop, context: bpy.types.Context):
     # context checks
     camera = context.object
     if not camera:
+        print(f"camera {camera} not found during data update")
         return
     node = camera.parent
     if not node or node.type != "CURVE":
+        print(f"node {node} not found during data update for camera {camera}")
         return
     root = node.parent
     if root.type != "EMPTY" and root.ObjProp.KCS_obj_type != "Collision":
@@ -1125,10 +1157,9 @@ def update_camera_data(cam_prop, context: bpy.types.Context):
     if not node_distance:
         print("node is not connected to root node")
         return
-    # clear out previous animations if on different intervals
-    if camera.data.KCS_cam.animated_node_num != node_num:
-        remove_all_animation(camera)
-        remove_all_animation(camera.data)
+    # clear out previous animations
+    remove_all_animation(camera)
+    remove_all_animation(camera.data)
 
     frame_start = int(node_distance[1])
     resolve_time = int(node_distance[0].node_length)
@@ -1162,12 +1193,11 @@ def set_node_data(node: bpy.types.Object, camera: bpy.types.Object):
 def set_camera_data(camera: bpy.types.Object, kcs_node: KCS_Node, frame_start: int = 0, resolve_time: int = 120):
     node_num = kcs_node.node_num
     kcs_cam = camera.data.KCS_cam
-    kcs_cam.animated_node_num = node_num
     # vertical FOV
     camera.data.sensor_fit = "VERTICAL"
     camera.data.sensor_width = 75
     camera.data.sensor_height = 43
-    camera.data.passepartout_alpha = 0.8
+    camera.data.passepartout_alpha = 0.9
     camera.data.show_composition_center = True
 
     scale = bpy.context.scene.KCS_scene.scale
@@ -1269,6 +1299,7 @@ def swap_active_camera(camera: bpy.types.Object, frame: int):
     bpy.ops.anim.change_frame(frame=frame)
     bpy.ops.marker.add()
     bpy.ops.marker.camera_bind()
+    bpy.ops.anim.change_frame(frame=0)
     bpy.context.area.type = former_area
 
 
@@ -1301,11 +1332,15 @@ def export_col_c(name: str, obj: bpy.types.Object, context: bpy.types.Context):
 def import_col_bin(bin_file: BinaryIO, context: bpy.types.Context, name: str):
     LS = bin_file
     LS = open(LS, "rb")
-    collection = context.scene.collection
-    rt = make_empty(name, "PLAIN_AXES", collection)
+    if context.scene.KCS_scene.use_collections:
+        collision_collection = bpy.data.collections.new(name)
+        context.scene.collection.children.link(collision_collection)
+    else:
+        collision_collection = context.scene.collection
+    rt = make_empty(name, "PLAIN_AXES", collision_collection)
     rt.KCS_obj.KCS_obj_type = "Collision"
     LS_Block = MiscBinary(LS.read())
-    write = BpyCollision(rt, collection)
+    write = BpyCollision(rt, collision_collection)
     write.write_bpy_col(LS_Block, context.scene, context.scene.KCS_scene.scale)
 
 
@@ -1325,7 +1360,7 @@ def add_node(Rt: bpy.types.Object, collection: bpy.types.Collection):
     collection.objects.link(CamObj)
     parentObject(Node, CamObj, 0)
     # Make Camera Volume
-    Vol = make_empty("KCS Cam Volume", "CUBE", collection)
-    Vol.KCS_obj.KCS_obj_type = "Camera Volume"
-    parentObject(CamObj, Vol, 0)
+    # Vol = make_empty("KCS Cam Volume", "CUBE", collection)
+    # Vol.KCS_obj.KCS_obj_type = "Camera Volume"
+    # parentObject(CamObj, Vol, 0)
     Rt.select_set(True)

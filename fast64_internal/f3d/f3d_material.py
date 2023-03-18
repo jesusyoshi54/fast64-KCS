@@ -2661,6 +2661,50 @@ class RenderModeProperty(bpy.types.PropertyGroup):
     def render_custom(self):
         return self.rendermode_preset_cycle_1 == "Custom" or self.rendermode_preset_cycle_2 == "Custom"
 
+    def set_render_mode_adv(self, cycle_1: str, cycle_2: str):
+        self.prop_lock = True
+        # func contents here
+        self.prop_lock = False
+    
+    def set_render_mode(self, cycle_1: str, cycle_2: str, use_flags: bool = False):
+        self.prop_lock = True
+        if use_flags:
+            self.prop_lock = False
+            self.set_render_mode_adv(cycle_1, cycle_2)
+            return
+        # check for enum selection first
+        cycle_1_enums = propertyGroupGetEnums(self, "rendermode_preset_cycle_1")
+        cycle_2_enums = propertyGroupGetEnums(self, "rendermode_preset_cycle_2")
+        if cycle_1 in cycle_1_enums and cycle_2 in cycle_2_enums:
+            self.rendermode_preset_cycle_1 = cycle_1
+            self.rendermode_preset_cycle_2 = cycle_2
+            return
+        # now set via combinatoric selector
+        self.missing_RM = False
+        self.ZB = "ZB" in cycle_1 or "ZB" in cycle_2
+        # check if one cycle is one of the differing enums, and if it is
+        # use 2nd cycle to find macro flags
+        one_cyc_bhv = [cyc_1[0] for cyc_1 in enum1cycleOpt if cyc_1[0] in cycle_1]
+        if not one_cyc_bhv:
+            search_cyc = cycle_1
+            self.cycle_mismatch = True
+        else:
+            search_cyc = cycle_2
+            self.cycle_1_options = one_cyc_bhv[0]
+            self.cycle_mismatch = False
+        surf_type_enum = [surf[0] for surf in enumSurfType if surf[0] in search_cyc]
+        # this means the user likely chose a mode like G_RM_ADD and there is no equiv in combinatoric options
+        if surf_type_enum:
+            self.surf_type_enum = surf_type_enum[0]
+            self.Z_type_enum = [z_mode[0] for z_mode in enumZType if z_mode[0] in search_cyc][0]
+            aa_enum = [AA_mode[0] for AA_mode in enumAAType if AA_mode[0] in search_cyc]
+            if not aa_enum:
+                self.aa_enum = "None"
+            else:
+                self.aa_enum = [AA_mode[0] for AA_mode in enumAAType if AA_mode[0] in search_cyc][0]
+        self.set_flags_from_macro()
+        self.prop_lock = False
+    
     def get_render_mode(self, rdp_settings = None):
         if rdp_settings:
             G_CYC_2CYCLE = rdp_settings.g_mdsft_cycletype == "G_CYC_2CYCLE"
@@ -2709,7 +2753,7 @@ class RenderModeProperty(bpy.types.PropertyGroup):
             # uh oh stinky
             return None
         bit_flags = dict()
-        for flag_set, shifts, blend_fields in ((flags1, (30, 26, 22, 18), self.bend_fields_1()), (flags2, (28, 24, 20, 16), self.bend_fields_2())):
+        for flag_set, shifts, blend_fields in ((flags1, (30, 26, 22, 18), self.blend_fields_1()), (flags2, (28, 24, 20, 16), self.blend_fields_2())):
             if flag_set:
                bit_flags.update( {prop:self.get_flag_from_macro(f3d, flag_set, prop) for prop in self.fields()} )
                bit_flags.update( {prop:self.get_flag_from_macro(f3d, flag_set, prop, shift = shift) for shift, prop in zip(shifts, blend_fields)} )
@@ -2786,7 +2830,7 @@ class RenderModeProperty(bpy.types.PropertyGroup):
             "force_bl",
             )
     
-    def bend_fields_1(self):
+    def blend_fields_1(self):
         return (
             "blend_p1",
             "blend_a1",
@@ -2794,7 +2838,7 @@ class RenderModeProperty(bpy.types.PropertyGroup):
             "blend_b1",
             )
     
-    def bend_fields_2(self):
+    def blend_fields_2(self):
         return (
             "blend_p2",
             "blend_a2",

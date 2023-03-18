@@ -21,6 +21,7 @@ from ..utility import PluginError, parentObject
 class KCS_Import_Col(Operator):
     bl_label = "Import Col Data"
     bl_idname = "kcs.import_col"
+    bl_description = "Imports a level settings block to the currently selected Bank/ID pair. Level settings block imports are retrieved from the 'misc' folder in your selected folder"
 
     def execute(self, context: bpy.types.Context):
         scene = context.scene.KCS_scene
@@ -42,6 +43,7 @@ class KCS_Import_Col(Operator):
 class KCS_Import_NLD_Gfx(Operator):
     bl_label = "Import Gfx Data"
     bl_idname = "kcs.import_nld_gfx"
+    bl_description = "Imports a geo block to the currently selected Bank/ID pair. Geo block imports are retrieved from the 'geo' folder in your selected folder"
 
     def execute(self, context: bpy.types.Context):
         scene = context.scene.KCS_scene
@@ -65,6 +67,7 @@ class KCS_Import_NLD_Gfx(Operator):
 class KCS_Import_Stage(Operator):
     bl_label = "Import Stage"
     bl_idname = "kcs.import_stage"
+    bl_description = "Imports a geo and level settings block to the currently selected stage. The target misc and geo Bank/IDs are retrieved from the main stage table in your selected folder"
 
     def execute(self, context: bpy.types.Context):
         scene = context.scene.KCS_scene
@@ -107,6 +110,7 @@ class KCS_Import_Stage(Operator):
 class KCS_Export(Operator):
     bl_label = "Export Area"
     bl_idname = "kcs.export_area"
+    bl_description = "Exports a geo and level settings block to the currently selected stage. The target misc and geo Bank/IDs are retrieved from the main stage table in your selected folder"
 
     def execute(self, context: bpy.types.Context):
         scene = context.scene.KCS_scene
@@ -163,6 +167,7 @@ class KCS_Export(Operator):
 class KCS_Export_Gfx(Operator):
     bl_label = "Export Gfx"
     bl_idname = "kcs.export_gfx"
+    bl_description = "Exports a geo block to the currently selected Bank/ID pair. Geo block exports goes into the 'geo' folder in your selected folder"
 
     def execute(self, context: bpy.types.Context):
         scene = context.scene.KCS_scene
@@ -190,6 +195,7 @@ class KCS_Export_Gfx(Operator):
 class KCS_Export_Col(Operator):
     bl_label = "Export Col"
     bl_idname = "kcs.export_col"
+    bl_description = "Exports a level settings block to the currently selected Bank/ID pair. Level settings block exports goes into the 'misc' folder in your selected folder"
 
     def execute(self, context: bpy.types.Context):
         scene = context.scene.KCS_scene
@@ -223,6 +229,7 @@ class KCS_Export_Col(Operator):
 class KCS_Add_Level(Operator):
     bl_label = "Add Level Empty"
     bl_idname = "kcs.add_kcslevel"
+    bl_description = "Adds a level root object with collision and graphics children properly setup, and adds a single node to the collision root"
 
     def execute(self, context: bpy.types.Context):
         collection = bpy.context.scene.collection
@@ -260,6 +267,7 @@ class KCS_Add_Level(Operator):
 class KCS_Add_Node(Operator):
     bl_label = "Add Node"
     bl_idname = "kcs.add_kcsnode"
+    bl_description = "Adds a new node as a child to the current collision root object"
 
     def execute(self, context: bpy.types.Context):
         Rt = context.object
@@ -272,9 +280,11 @@ class KCS_Add_Node(Operator):
 class KCS_Animate_Nodes(Operator):
     bl_label = "Animate Camera"
     bl_idname = "kcs.anim_camera"
+    bl_description = "Animates all camera starting at the root node, and then sets scene rendering properties for the most accurate preview possible with current kirby and n64 knowledge. Subject to improvements"
 
     def execute(self, context: bpy.types.Context):
         col_root = context.object
+        max_frame = 0
         for child in col_root.children:
             if child.type == "CURVE":
                 camera = find_item_from_iterable(child.children, "type", "CAMERA")
@@ -282,9 +292,24 @@ class KCS_Animate_Nodes(Operator):
                 if node_distance:
                     frame_start = int(node_distance[1])
                     resolve_time = int(node_distance[0].node_length)
-                    if frame_start + resolve_time > context.scene.frame_end:
-                        context.scene.frame_end = frame_start + resolve_time
+                    if frame_start + resolve_time > max_frame:
+                        max_frame = frame_start + resolve_time
+                        context.scene.frame_end = max_frame
                     set_camera_pathing(camera, child, frame_start=frame_start, resolve_time=resolve_time)
+        # set rendering properties to fit kirby
+        context.scene.render.engine = "BLENDER_EEVEE" # speed
+        context.scene.eevee.taa_render_samples = 16 # speed
+        context.scene.view_settings.view_transform = "Standard"
+        context.scene.sequencer_colorspace_settings.name = "sRGB"
+        context.scene.view_settings.exposure = 0
+        context.scene.view_settings.gamma = 1
+        context.scene.frame_start = 0
+        context.scene.render.resolution_x = 300
+        context.scene.render.resolution_y = 172
+        context.scene.render.fps = 30
+        context.scene.render.film_transparent = True
+        context.scene.render.image_settings.file_format = "FFMPEG"
+        bpy.ops.script.python_file_run(filepath="C:\\Program Files\\Blender Foundation\\Blender 3.2\\3.2\\scripts\\presets\\ffmpeg\\WebM_(VP9+Opus).py") # webm output preset
         return {"FINISHED"}
 
 
@@ -292,6 +317,7 @@ class KCS_Animate_Nodes(Operator):
 class KCS_Add_Ent(Operator):
     bl_label = "Add Entity"
     bl_idname = "kcs.add_kcsent"
+    bl_description = "Adds a single entity as a child of the current node"
 
     def execute(self, context: bpy.types.Context):
         node = context.object.data.KCS_node

@@ -93,6 +93,7 @@ class KCS_Scene_Props(PropertyGroup):
         name="Format", description="The file format for data", items=[("binary", "binary", ""), ("C", "C", "")]
     )
     clean_up: BoolProperty(name="Clean Up", description="Post process imports to be cleaner", default=True)
+    use_collections: BoolProperty(name="Use Collections", description="Places imports into their own collection based on general type", default=True)
 
 
 # ------------------------------------------------------------------------
@@ -152,7 +153,6 @@ class CamProp(PropertyGroup):
     pan_vertical: BoolProperty(name="Pan Vertical", description="Pans Camera in Y axis to follow kirby")
     pan_below: BoolProperty(name="Pan Below", description="Pans Camera in Y axis to follow kirby while falling only")
     profile_view: BoolProperty(name="ProfileView", description="View Kirby From Side")
-    animated_node_num: IntProperty(name="Anim Node Number", description="Node num last animated at", default=0, min=0)
     follow_yaw: FloatVectorProperty(
         name="Yaw",
         description="The Theta Rotation from kirby to cam while following",
@@ -297,7 +297,7 @@ class ObjProp(PropertyGroup):
             ("Graphics", "Graphics", ""),
             ("Collision", "Collision", ""),
             ("Entity", "Entity", ""),
-            ("Camera Volume", "Camera Volume", ""),
+            # ("Camera Volume", "Camera Volume", ""),
         ],
     )
     root_node: IntProperty(name="root node", default=0, min=0)

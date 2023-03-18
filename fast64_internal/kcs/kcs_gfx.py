@@ -1159,9 +1159,13 @@ def export_geo_c(name: str, obj: bpy.types.Object, context: bpy.types.Context):
 def import_geo_bin(bin_file: BinaryIO, context: bpy.types.Context, name: str, path: Path):
     Geo = bin_file
     Geo = open(Geo, "rb")
-    collection = context.scene.collection
-    rt = make_empty(name, "PLAIN_AXES", collection)
+    if context.scene.KCS_scene.use_collections:
+        gfx_collection = bpy.data.collections.new(name)
+        context.scene.collection.children.link(gfx_collection)
+    else:
+        gfx_collection = context.scene.collection
+    rt = make_empty(name, "PLAIN_AXES", gfx_collection)
     rt.KCS_obj.KCS_obj_type = "Graphics"
     Geo_Block = GeoBinary(Geo.read(), context.scene.KCS_scene.scale)
     write = BpyGeo(rt, context.scene.KCS_scene.scale)
-    write.write_bpy_gfx_from_geo("geo", Geo_Block, path, collection)
+    write.write_bpy_gfx_from_geo("geo", Geo_Block, path, gfx_collection)

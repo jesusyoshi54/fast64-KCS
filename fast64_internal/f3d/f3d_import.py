@@ -305,17 +305,9 @@ class Mat:
                 x.append(z)
         return x
 
-    # only work with macros I can recognize for now
     def set_render_mode(self, f3d):
-        rdp = f3d.rdp_settings
-        rdp.set_rendermode = True
-        # if the enum isn't there, then just print an error for now
-        try:
-            rdp.render_mode.rendermode_preset_cycle_1 = self.RenderMode[0]
-            rdp.render_mode.rendermode_preset_cycle_2 = self.RenderMode[1]
-            # print(f"set render modes with render mode {self.RenderMode}")
-        except:
-            print(f"could not set render modes with render mode {self.RenderMode}")
+        f3d.rdp_settings.render_mode.set_rendermode = True
+        f3d.rdp_settings.render_mode.set_render_mode(self.RenderMode[0], self.RenderMode[1])
 
     def set_geo_mode(self, rdp, mat):
         # texture gen has a different name than gbi
