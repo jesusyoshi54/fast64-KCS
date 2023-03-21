@@ -1421,8 +1421,7 @@ def set_texture_settings_node(material: bpy.types.Material):
     desired_group = bpy.data.node_groups["TextureSettings_Lite"]
     if (material.f3d_mat.tex0.tex and not material.f3d_mat.tex0.autoprop) or (
         material.f3d_mat.tex1.tex and not material.f3d_mat.tex1.autoprop or 
-        material.f3d_mat.tex0.has_tile_scroll or
-        material.f3d_mat.tex1.has_tile_scroll
+        material.f3d_mat.has_scroll
     ):
         desired_group = bpy.data.node_groups["TextureSettings_Advanced"]
     if textureSettings.node_tree is not desired_group:
@@ -2041,38 +2040,34 @@ def update_tex_field_prop(self: bpy.types.Property, context: bpy.types.Context):
         # update drivers
         update_tex_drivers(self, context)
 
+
 def update_tex_drivers(self: bpy.types.Property, context: bpy.types.Context):
     with F3DMaterial_UpdateLock(get_material_from_context(context)) as material:
         if not material:
             return
         set_texture_settings_node(material)
         node_group = "TextureSettings"
-        # if it is in auto prop, the path changes, so delete the old drivers because things get mapped to the same input socket, even if it is a different value
-        if (material.f3d_mat.tex0.has_tile_scroll or material.f3d_mat.tex1.has_tile_scroll):
+        driver_manager = None
+        if material.f3d_mat.has_tile_scroll:
             # check if scroll exists
-            if material.f3d_mat.tex0.tex:
-                driver_s_0 = get_tex_field_driver(material, node_group, "0 S Low")
-                update_driver_on_interval(driver_s_0.driver, *get_tile_scroll_values(material.f3d_mat.tex0, s = True))
-                driver_t_0 = get_tex_field_driver(material, node_group, "0 T Low")
-                update_driver_on_interval(driver_t_0.driver, *get_tile_scroll_values(material.f3d_mat.tex0, t = True))
-            if material.f3d_mat.tex1.tex:
-                driver_s_1 = get_tex_field_driver(material, node_group, "1 S Low")
-                update_driver_on_interval(driver_s_1.driver, *get_tile_scroll_values(material.f3d_mat.tex1, s = True))
-                driver_t_1 = get_tex_field_driver(material, node_group, "1 T Low")
-                update_driver_on_interval(driver_t_1.driver, *get_tile_scroll_values(material.f3d_mat.tex1, t = True))
-        else:
-            # vals can be high if auto prop is off, and TextureSettingsLite node is used
-            remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 S Low"], "default_value")
-            remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 T Low"], "default_value")
-            remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 S High"], "default_value")
-            remove_driver(material.node_tree, material.node_tree.nodes[node_group].inputs["0 T High"], "default_value")
-            # set values back to default
-            tex_0 = material.f3d_mat.tex0
-            material.node_tree.nodes[node_group].inputs["0 S Low"].default_value = trunc_10_2(tex_0.S.low)
-            material.node_tree.nodes[node_group].inputs["0 T Low"].default_value = trunc_10_2(tex_0.T.low)
-            tex_1 = material.f3d_mat.tex1
-            material.node_tree.nodes[node_group].inputs["1 S Low"].default_value = trunc_10_2(tex_1.S.low)
-            material.node_tree.nodes[node_group].inputs["1 T Low"].default_value = trunc_10_2(tex_1.T.low)
+            if material.f3d_mat.tex0.has_scroll:
+                driver_manager = set_tile_scroll_drivers(material, node_group, 0, driver_manager = driver_manager)
+            if material.f3d_mat.tex1.has_scroll:
+                driver_manager = set_tile_scroll_drivers(material, node_group, 1, driver_manager = driver_manager)
+        if material.f3d_mat.has_uv_scroll:
+            if material.f3d_mat.UVanim0.has_scroll:
+                driver_manager = set_uv_scroll_drivers(material, node_group, 0, driver_manager = driver_manager)
+            if material.f3d_mat.UVanim1.has_scroll:
+                driver_manager = set_uv_scroll_drivers(material, node_group, 1, driver_manager = driver_manager)
+        # reset if no data
+        if not material.f3d_mat.UVanim0.has_scroll and not material.f3d_mat.tex0.has_scroll:
+            remove_all_scroll_drivers(material, node_group, 0)
+            reset_tile_scroll_drivers(material, node_group, 0)
+        if not material.f3d_mat.UVanim1.has_scroll and not material.f3d_mat.tex1.has_scroll:
+            remove_all_scroll_drivers(material, node_group, 1)
+            reset_tile_scroll_drivers(material, node_group, 1)
+        if driver_manager:
+            driver_manager.apply_expressions()
 
 
 def toggle_auto_prop(self, context: bpy.types.Context):
@@ -2207,7 +2202,7 @@ class TextureProperty(bpy.types.PropertyGroup):
     tile_scroll: bpy.props.PointerProperty(type=SetTileSizeScrollProperty)
 
     @property
-    def has_tile_scroll(self):
+    def has_scroll(self):
         return self.tex and self.tile_scroll.has_scroll
     
     def get_tex_size(self) -> list[int]:
@@ -2437,7 +2432,7 @@ class ProceduralAnimProperty(bpy.types.PropertyGroup):
     offset: bpy.props.FloatProperty(name="Offset", default=0)
     noiseAmplitude: bpy.props.FloatProperty(name="Amplitude", default=1)
     animate: bpy.props.BoolProperty()
-    animType: bpy.props.EnumProperty(name="Type", items=enumTexScroll)
+    animType: bpy.props.EnumProperty(name="Type", items=enumTexScroll, update=update_tex_drivers)
 
     def key(self):
         anim = self.animate
@@ -2454,13 +2449,17 @@ class ProceduralAnimProperty(bpy.types.PropertyGroup):
 
 
 class ProcAnimVectorProperty(bpy.types.PropertyGroup):
-    x: bpy.props.PointerProperty(type=ProceduralAnimProperty)
-    y: bpy.props.PointerProperty(type=ProceduralAnimProperty)
-    z: bpy.props.PointerProperty(type=ProceduralAnimProperty)
+    x: bpy.props.PointerProperty(type=ProceduralAnimProperty, update=update_tex_drivers)
+    y: bpy.props.PointerProperty(type=ProceduralAnimProperty, update=update_tex_drivers)
+    z: bpy.props.PointerProperty(type=ProceduralAnimProperty, update=update_tex_drivers)
     pivot: bpy.props.FloatVectorProperty(size=2, name="Pivot")
     angularSpeed: bpy.props.FloatProperty(default=1, name="Angular Speed")
     menu: bpy.props.BoolProperty()
 
+    @property
+    def has_scroll(self):
+        return self.x.animType != "None" or self.y.animType != "None" or self.z.animType != "None"
+    
     def key(self):
         return (
             self.x.key(),
@@ -3497,6 +3496,18 @@ class F3DMaterialProperty(bpy.types.PropertyGroup):
     draw_layer: bpy.props.PointerProperty(type=DrawLayerProperty)
     use_large_textures: bpy.props.BoolProperty(name="Large Texture Mode")
 
+    @property
+    def has_uv_scroll(self):
+        return self.UVanim0.has_scroll or self.UVanim1.has_scroll
+    
+    @property
+    def has_tile_scroll(self):
+        return self.tex0.has_scroll or self.tex1.has_scroll
+        
+    @property
+    def has_scroll(self):
+        return self.has_uv_scroll or self.has_tile_scroll
+    
     def key(self) -> F3DMaterialHash:
         useDefaultLighting = self.set_lights and self.use_default_lighting
         return (
