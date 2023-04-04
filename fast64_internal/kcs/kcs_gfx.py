@@ -971,7 +971,7 @@ class EntryPoint(BinWrite):
 
     def to_c(self):
         CData = KCS_Cdata()
-        self.write_arr(CData, "struct EntryPoint", f"EntryPoint_{self.index}", self.targets, self.format_arr)
+        self.write_arr(CData, "struct EntryPoint", f"EntryPoint_{self.index}", self.targets, self.format_arr, outer_only=True, length=len(self.targets))
         # add pointers
         self.ptr_obj(self, CData, f"&EntryPoint_{self.index}")
         return CData
