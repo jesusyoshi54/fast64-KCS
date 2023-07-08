@@ -58,6 +58,11 @@ from ..utility import (
     geoNodeRotateOrder,
 )
 
+from ..f3d.f3d_material import (
+    isTexturePointSampled,
+    isLightingDisabled,
+)
+
 from ..f3d.f3d_writer import (
     TriangleConverterInfo,
     LoopConvertInfo,
@@ -70,9 +75,7 @@ from ..f3d.f3d_writer import (
     saveOrGetF3DMaterial,
     saveMeshWithLargeTexturesByFaces,
     saveMeshByFaces,
-    isLightingDisabled,
     getF3DVert,
-    isTexturePointSampled,
     convertVertexData,
 )
 
@@ -328,24 +331,40 @@ def getCameraObj(camera):
 
 
 def appendRevertToGeolayout(geolayoutGraph, fModel):
-    fModel.materialRevert = GfxList(
+    materialRevert = GfxList(
         fModel.name + "_" + "material_revert_render_settings", GfxListTag.MaterialRevert, fModel.DLFormat
     )
-    revertMatAndEndDraw(fModel.materialRevert, [DPSetEnvColor(0xFF, 0xFF, 0xFF, 0xFF), DPSetAlphaCompare("G_AC_NONE")])
+    revertMatAndEndDraw(materialRevert, [DPSetEnvColor(0xFF, 0xFF, 0xFF, 0xFF), DPSetAlphaCompare("G_AC_NONE")])
 
-    # Get all draw layers, turn layers into strings (some are ints), deduplicate using a set
-    drawLayers = set(str(layer) for layer in geolayoutGraph.getDrawLayers())
+    # walk the geo layout graph to find the last used DL for each layer
+    last_gfx_list = dict()
+    
+    def walk(node, last_gfx_list):
+        base_node = node.node
+        if type(base_node) == JumpNode:
+            if base_node.geolayout:
+                for node in base_node.geolayout.nodes:
+                    last_gfx_list = walk(node, last_gfx_list)
+            else:
+                last_materials = dict()
+        fMesh = getattr(base_node, "fMesh", None)
+        if fMesh:
+            cmd_list = fMesh.drawMatOverrides.get(base_node.override_hash, None) or fMesh.draw
+            last_gfx_list[base_node.drawLayer] = cmd_list
+        for child in node.children:
+            last_gfx_list = walk(child, last_gfx_list)
+        return last_gfx_list
+    
+    for node in geolayoutGraph.startGeolayout.nodes:
+        last_gfx_list = walk(node, last_gfx_list)
 
     # Revert settings in each draw layer
-    for layer in sorted(drawLayers):  # Must be sorted, otherwise ordering is random due to `set` behavior
-        dlNode = DisplayListNode(layer)
-        dlNode.DLmicrocode = fModel.materialRevert
-
-        # Assume first node is start render area
-        # This is important, since a render area groups things separately.
-        # If we added these nodes outside the render area, they would not happen
-        # right after the nodes inside.
-        geolayoutGraph.startGeolayout.nodes[0].children.append(TransformNode(dlNode))
+    for gfx_list in last_gfx_list.values():
+        # remove SPEndDisplayList from gfx_list, materialRevert has its own SPEndDisplayList cmd
+        while SPEndDisplayList() in gfx_list.commands:
+            gfx_list.commands.remove(SPEndDisplayList())
+            
+        gfx_list.commands.extend(materialRevert.commands)
 
 
 # Convert to Geolayout
@@ -1552,6 +1571,7 @@ def processMesh(
                 if not firstNodeProcessed:
                     node.DLmicrocode = fMesh.draw
                     node.fMesh = fMesh
+                    node.bleed_independently = obj.bleed_independently
                     node.drawLayer = drawLayer  # previous drawLayer assigments useless?
                     firstNodeProcessed = True
                 else:
@@ -1562,6 +1582,7 @@ def processMesh(
                     )
                     additionalNode.DLmicrocode = fMesh.draw
                     additionalNode.fMesh = fMesh
+                    additionalNode.bleed_independently = obj.bleed_independently
                     additionalTransformNode = TransformNode(additionalNode)
                     transformNode.children.append(additionalTransformNode)
                     additionalTransformNode.parent = transformNode
@@ -2413,7 +2434,7 @@ def saveModelGivenVertexGroup(
             material = obj.material_slots[material_index].material
             checkForF3dMaterialInFaces(obj, material)
             fMaterial, texDimensions = saveOrGetF3DMaterial(material, fModel, obj, drawLayer, convertTextureData)
-            if fMaterial.useLargeTextures:
+            if fMaterial.isTexLarge[0] or fMaterial.isTexLarge[1]:
                 currentGroupIndex = saveMeshWithLargeTexturesByFaces(
                     material,
                     bFaces,
@@ -2479,7 +2500,7 @@ def saveOverrideDraw(obj, fModel, material, specificMat, overrideType, fMesh, dr
     # Scan the displaylist to look for material loads and reverts
     # Use a while instead of a for to be able to insert into the list during iteration
     commandIdx = 0
-    
+
     while commandIdx < len(meshMatOverride.commands):
         # Get the command at the current index
         command = meshMatOverride.commands[commandIdx]
@@ -2551,12 +2572,17 @@ def saveOverrideDraw(obj, fModel, material, specificMat, overrideType, fMesh, dr
                 # Reverts are only needed if the next command is a different material load
                 if fMaterial.revert is None and fOverrideMat.revert is not None:
                     nextCommand = meshMatOverride.commands[commandIdx + 1]
-                    if isinstance(nextCommand, SPDisplayList) and nextCommand.displayList.tag == GfxListTag.Material and nextCommand.displayList != prevMaterial.material:
+                    if (
+                        isinstance(nextCommand, SPDisplayList)
+                        and nextCommand.displayList.tag == GfxListTag.Material
+                        and nextCommand.displayList != prevMaterial.material
+                    ):
                         # Insert the new command
                         meshMatOverride.commands.insert(commandIdx + 1, SPDisplayList(fOverrideMat.revert))
                         commandIdx += 1
         # iterate to the next cmd
         commandIdx += 1
+
 
 def findVertIndexInBuffer(loop, buffer, loopDict):
     i = 0
@@ -2703,6 +2729,7 @@ def saveSkinnedMeshByMaterial(
                     obj.data,
                     bufferVert.f3dVert.position,
                     bufferVert.f3dVert.uv,
+                    bufferVert.f3dVert.stOffset,
                     bufferVert.f3dVert.getColorOrNormal(),
                     texDimensions,
                     parentMatrix,
@@ -2727,7 +2754,7 @@ def saveSkinnedMeshByMaterial(
         material = obj.material_slots[material_index].material
         faces = [skinnedFace.bFace for skinnedFace in skinnedFaceArray]
         fMaterial, texDimensions = saveOrGetF3DMaterial(material, fModel, obj, drawLayer, convertTextureData)
-        if fMaterial.useLargeTextures:
+        if fMaterial.isTexLarge[0] or fMaterial.isTexLarge[1]:
             saveMeshWithLargeTexturesByFaces(
                 material,
                 faces,
@@ -2777,9 +2804,9 @@ def saveSkinnedMeshByMaterial(
     # 	convertInfo = LoopConvertInfo(uv_data, obj, exportVertexColors)
     # 	triConverter = TriangleConverter(triConverterInfo, texDimensions, material,
     # 		None, triGroup.triList, triGroup.vertexList, copy.deepcopy(existingVertData), copy.deepcopy(matRegionDict))
-    # 	saveTriangleStrip(triConverter, [skinnedFace.bFace for skinnedFace in skinnedFaceArray], obj.data, True)
+    # 	saveTriangleStrip(triConverter, [skinnedFace.bFace for skinnedFace in skinnedFaceArray], None, obj.data, True)
     # 	saveTriangleStrip(triConverterClass,
-    # 		[skinnedFace.bFace for skinnedFace in skinnedFaceArray],
+    # 		[skinnedFace.bFace for skinnedFace in skinnedFaceArray], None,
     # 		convertInfo, triGroup.triList, triGroup.vertexList, fModel.f3d,
     # 		texDimensions, currentMatrix, isPointSampled, exportVertexColors,
     # 		copy.deepcopy(existingVertData), copy.deepcopy(matRegionDict),
