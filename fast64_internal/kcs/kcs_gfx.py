@@ -24,6 +24,7 @@ from .kcs_data import (
     texture_scroll_struct,
 )
 
+from ..utility_importer import *
 from ..utility import (
     propertyGroupGetEnums,
     checkUniqueBoneNames,
@@ -68,20 +69,15 @@ class Vertices:
     _UV = namedtuple("UV", "s t")
     _color = namedtuple("rgba", "r g b a")
 
-    def __init__(self, scale: float):
+    def __init__(self):
         self.UVs = []
         self.VCs = []
         self.Pos = []
-        self.scale = scale
 
     def _make(self, v: tuple):
-        self.Pos.append(self.scale_verts(self._Vec3._make(v[0:3])))
+        self.Pos.append(self._Vec3._make(v[0:3]))
         self.UVs.append(self._UV._make(v[4:6]))
         self.VCs.append(self._color._make(v[6:10]))  # holds norms and vcs when importing
-
-    def scale_verts(self, pos: tuple):
-        v = [a / self.scale for a in pos]
-        return v
 
 
 # this is the class that holds the actual individual scroll struct and textures
@@ -129,9 +125,26 @@ class Tex_Scroll(BinProcess, BinWrite):
 
 # used to parse imports with specific kirby information, works on entire layouts
 class KCS_F3d(DL):
-    def __init__(self, lastmat=None):
-        super().__init__()
-        self.num = self.LastMat.name  # for debug
+    def __init__(self, last_mat = None):
+        self.last_layout = None
+        self.cur_geo = None
+        super().__init__(lastmat = last_mat)
+
+    # the dl stream is already split into a tuple of name, args so
+    # I'll alter the parsing bhv to reflect that
+    def parse_stream(self, dat_stream: Sequence[Any], entry_id: Any):
+        parser = self.parsed_streams.get(entry_id)
+        if not parser:
+            self.parsed_streams[entry_id] = (parser := Parser(dat_stream))
+        for line in parser.stream():
+            cur_macro = Macro(*line)
+            func = getattr(self, cur_macro.cmd, None)
+            if not func:
+                raise Exception(f"Macro {cur_macro} not found in parser function")
+            else:
+                flow_status = func(cur_macro)
+            if flow_status == self.break_parse:
+                return
 
     # use tex scroll struct info to get the equivalent dynamic DL, and set the t_scroll flag to true in mat so when getting mats, I can return an array of mats
     def insert_scroll_dyn_dl(self, Geo, layout, scr_num):
@@ -183,180 +196,57 @@ class KCS_F3d(DL):
 
     # recursively parse the display list in order to return a bunch of model data
     def get_data_from_dl(self, Geo, layout):
-        self.VertBuff = [0] * 32  # If you're doing some fucky shit with a larger vert buffer it sucks to suck I guess
+        self.VertBuff = [0] * 32
         self.Tris = []
         self.UVs = []
         self.VCs = []
         self.Verts = []
         self.Mats = []
         self.NewMat = 0
+        self.cur_geo = Geo
+        self.last_layout = layout
         if hasattr(layout, "DLs"):
-            for k in layout.entry:
-                DL = layout.DLs[k]
-                self.parse_dl(DL, Geo, layout)
+            for entry_ptr in layout.entry:
+                self.parse_stream(layout.DLs[entry_ptr], entry_ptr)
         return (self.Verts, self.Tris)
 
-    def parse_dl(self, DL, Geo, layout):
-        # This will be the equivalent of a giant switch case
-        x = -1
-        while x < len(DL):
-            # manaual iteration so I can skip certain children efficiently if needed
-            x += 1
-            (cmd, args) = DL[x]  # each member is a tuple of (cmd, arguments)
-            LsW = cmd.startswith
-            # Deal with control flow first, this requires total DL context
-            if LsW("gsSPEndDisplayList"):
-                return
-            # recursively call parse_dl
-            if LsW("gsSPBranchList"):
-                if self.eval_dl_segptr(args[0]):
-                    self.parse_dl(layout.DLs[self.eval_dl_segptr(args[0])], Geo, layout)
-                else:
-                    scr_num = (eval(args[0]) & 0xFFFF) // 8
-                    self.insert_scroll_dyn_dl(Geo, layout, scr_num)
-                break
-            if LsW("gsSPDisplayList"):
-                if self.eval_dl_segptr(args[0]):
-                    self.parse_dl(layout.DLs[self.eval_dl_segptr(args[0])], Geo, layout)
-                else:
-                    scr_num = (eval(args[0]) & 0xFFFF) // 8
-                    self.insert_scroll_dyn_dl(Geo, layout, scr_num)
-                continue
-            # Vertices are one big list for kirby64, all buffers are combined in pre process
-            if LsW("gsSPVertex"):
-                # fill virtual buffer
-                args = [int(a) for a in args]
-                for i in range(args[2], args[2] + args[1], 1):
-                    self.VertBuff[i] = len(self.Verts) + i - args[2]
-                # verts are pre processed
-                self.Verts.extend(Geo.vertices.Pos[args[0] : args[0] + args[1]])
-                self.UVs.extend(Geo.vertices.UVs[args[0] : args[0] + args[1]])
-                self.VCs.extend(Geo.vertices.VCs[args[0] : args[0] + args[1]])
-            # tri and mat DL cmds will be called via parent class
-            func = getattr(self, cmd, None)
-            if func:
-                func(args)
+    def gsSPBranchList(self, macro: Macro):
+        if seg4_ptr := self.eval_dl_segptr(macro.args[0]):
+            self.reset_parser(seg4_ptr)
+            self.parse_stream(self.last_layout.DLs[seg4_ptr], seg4_ptr)
+        else:
+            scr_num = (eval(macro.args[0]) & 0xFFFF) // 8
+            self.insert_scroll_dyn_dl(self.cur_geo, self.last_layout, scr_num)
+            
+        return self.break_parse
 
-    def gsDPSetTextureImage(self, args):
+    def gsSPDisplayList(self, macro: Macro):
+        if seg4_ptr := self.eval_dl_segptr(macro.args[0]):
+            self.reset_parser(seg4_ptr)
+            self.parse_stream(self.last_layout.DLs[seg4_ptr], seg4_ptr)
+        else:
+            scr_num = (eval(macro.args[0]) & 0xFFFF) // 8
+            self.insert_scroll_dyn_dl(self.cur_geo, self.last_layout, scr_num)
+        return self.continue_parse
+        
+    def gsSPVertex(self, macro: Macro):
+        args = [int(a) for a in macro.args]
+        for i in range(args[2], args[2] + args[1], 1):
+            self.VertBuff[i] = len(self.Verts) + i - args[2]
+        # verts are pre processed
+        self.Verts.extend(self.cur_geo.vertices.Pos[args[0] : args[0] + args[1]])
+        self.UVs.extend(self.cur_geo.vertices.UVs[args[0] : args[0] + args[1]])
+        self.VCs.extend(self.cur_geo.vertices.VCs[args[0] : args[0] + args[1]])
+        return self.continue_parse
+        
+    def gsDPSetTextureImage(self, macro: Macro):
         self.NewMat = 1
-        Timg = (eval(args[3].strip()) >> 16, eval(args[3].strip()) & 0xFFFF)
-        Fmt = args[1].strip()
-        Siz = args[2].strip()
+        Timg = (eval(macro.args[3]) >> 16, eval(macro.args[3]) & 0xFFFF)
+        Fmt = macro.args[1]
+        Siz = macro.args[2]
         loadtex = Texture(Timg, Fmt, Siz)
         self.LastMat.loadtex = loadtex
-
-    def eval_combiner(self, arg):
-        # two args
-        GBI_CC_Macros = {
-            "G_CC_PRIMITIVE": ["0", "0", "0", "PRIMITIVE", "0", "0", "0", "PRIMITIVE"],
-            "G_CC_SHADE": ["0", "0", "0", "SHADE", "0", "0", "0", "SHADE"],
-            "G_CC_MODULATEI": ["TEXEL0", "0", "SHADE", "0", "0", "0", "0", "SHADE"],
-            "G_CC_MODULATEIDECALA": ["TEXEL0", "0", "SHADE", "0", "0", "0", "0", "TEXEL0"],
-            "G_CC_MODULATEIFADE": ["TEXEL0", "0", "SHADE", "0", "0", "0", "0", "ENVIRONMENT"],
-            "G_CC_MODULATERGB": ["TEXEL0", "0", "SHADE", "0", "0", "0", "0", "SHADE"],
-            "G_CC_MODULATERGBDECALA": ["TEXEL0", "0", "SHADE", "0", "0", "0", "0", "TEXEL0"],
-            "G_CC_MODULATERGBFADE": ["TEXEL0", "0", "SHADE", "0", "0", "0", "0", "ENVIRONMENT"],
-            "G_CC_MODULATEIA": ["TEXEL0", "0", "SHADE", "0", "TEXEL0", "0", "SHADE", "0"],
-            "G_CC_MODULATEIFADEA": ["TEXEL0", "0", "SHADE", "0", "TEXEL0", "0", "ENVIRONMENT", "0"],
-            "G_CC_MODULATEFADE": ["TEXEL0", "0", "SHADE", "0", "ENVIRONMENT", "0", "TEXEL0", "0"],
-            "G_CC_MODULATERGBA": ["TEXEL0", "0", "SHADE", "0", "TEXEL0", "0", "SHADE", "0"],
-            "G_CC_MODULATERGBFADEA": ["TEXEL0", "0", "SHADE", "0", "ENVIRONMENT", "0", "TEXEL0", "0"],
-            "G_CC_MODULATEI_PRIM": ["TEXEL0", "0", "PRIMITIVE", "0", "0", "0", "0", "PRIMITIVE"],
-            "G_CC_MODULATEIA_PRIM": ["TEXEL0", "0", "PRIMITIVE", "0", "TEXEL0", "0", "PRIMITIVE", "0"],
-            "G_CC_MODULATEIDECALA_PRIM": ["TEXEL0", "0", "PRIMITIVE", "0", "0", "0", "0", "TEXEL0"],
-            "G_CC_MODULATERGB_PRIM": ["TEXEL0", "0", "PRIMITIVE", "0", "TEXEL0", "0", "PRIMITIVE", "0"],
-            "G_CC_MODULATERGBA_PRIM": ["TEXEL0", "0", "PRIMITIVE", "0", "TEXEL0", "0", "PRIMITIVE", "0"],
-            "G_CC_MODULATERGBDECALA_PRIM": ["TEXEL0", "0", "PRIMITIVE", "0", "0", "0", "0", "TEXEL0"],
-            "G_CC_FADE": ["SHADE", "0", "ENVIRONMENT", "0", "SHADE", "0", "ENVIRONMENT", "0"],
-            "G_CC_FADEA": ["TEXEL0", "0", "ENVIRONMENT", "0", "TEXEL0", "0", "ENVIRONMENT", "0"],
-            "G_CC_DECALRGB": ["0", "0", "0", "TEXEL0", "0", "0", "0", "SHADE"],
-            "G_CC_DECALRGBA": ["0", "0", "0", "TEXEL0", "0", "0", "0", "TEXEL0"],
-            "G_CC_DECALFADE": ["0", "0", "0", "TEXEL0", "0", "0", "0", "ENVIRONMENT"],
-            "G_CC_DECALFADEA": ["0", "0", "0", "TEXEL0", "TEXEL0", "0", "ENVIRONMENT", "0"],
-            "G_CC_BLENDI": ["ENVIRONMENT", "SHADE", "TEXEL0", "SHADE", "0", "0", "0", "SHADE"],
-            "G_CC_BLENDIA": ["ENVIRONMENT", "SHADE", "TEXEL0", "SHADE", "TEXEL0", "0", "SHADE", "0"],
-            "G_CC_BLENDIDECALA": ["ENVIRONMENT", "SHADE", "TEXEL0", "SHADE", "0", "0", "0", "TEXEL0"],
-            "G_CC_BLENDRGBA": ["TEXEL0", "SHADE", "TEXEL0_ALPHA", "SHADE", "0", "0", "0", "SHADE"],
-            "G_CC_BLENDRGBDECALA": ["TEXEL0", "SHADE", "TEXEL0_ALPHA", "SHADE", "0", "0", "0", "TEXEL0"],
-            "G_CC_BLENDRGBFADEA": ["TEXEL0", "SHADE", "TEXEL0_ALPHA", "SHADE", "0", "0", "0", "ENVIRONMENT"],
-            "G_CC_ADDRGB": ["TEXEL0", "0", "TEXEL0", "SHADE", "0", "0", "0", "SHADE"],
-            "G_CC_ADDRGBDECALA": ["TEXEL0", "0", "TEXEL0", "SHADE", "0", "0", "0", "TEXEL0"],
-            "G_CC_ADDRGBFADE": ["TEXEL0", "0", "TEXEL0", "SHADE", "0", "0", "0", "ENVIRONMENT"],
-            "G_CC_REFLECTRGB": ["ENVIRONMENT", "0", "TEXEL0", "SHADE", "0", "0", "0", "SHADE"],
-            "G_CC_REFLECTRGBDECALA": ["ENVIRONMENT", "0", "TEXEL0", "SHADE", "0", "0", "0", "TEXEL0"],
-            "G_CC_HILITERGB": ["PRIMITIVE", "SHADE", "TEXEL0", "SHADE", "0", "0", "0", "SHADE"],
-            "G_CC_HILITERGBA": ["PRIMITIVE", "SHADE", "TEXEL0", "SHADE", "PRIMITIVE", "SHADE", "TEXEL0", "SHADE"],
-            "G_CC_HILITERGBDECALA": ["PRIMITIVE", "SHADE", "TEXEL0", "SHADE", "0", "0", "0", "TEXEL0"],
-            "G_CC_SHADEDECALA": ["0", "0", "0", "SHADE", "0", "0", "0", "TEXEL0"],
-            "G_CC_SHADEFADEA": ["0", "0", "0", "SHADE", "0", "0", "0", "ENVIRONMENT"],
-            "G_CC_BLENDPE": ["PRIMITIVE", "ENVIRONMENT", "TEXEL0", "ENVIRONMENT", "TEXEL0", "0", "SHADE", "0"],
-            "G_CC_BLENDPEDECALA": ["PRIMITIVE", "ENVIRONMENT", "TEXEL0", "ENVIRONMENT", "0", "0", "0", "TEXEL0"],
-            "_G_CC_BLENDPE": ["ENVIRONMENT", "PRIMITIVE", "TEXEL0", "PRIMITIVE", "TEXEL0", "0", "SHADE", "0"],
-            "_G_CC_BLENDPEDECALA": ["ENVIRONMENT", "PRIMITIVE", "TEXEL0", "PRIMITIVE", "0", "0", "0", "TEXEL0"],
-            "_G_CC_TWOCOLORTEX": ["PRIMITIVE", "SHADE", "TEXEL0", "SHADE", "0", "0", "0", "SHADE"],
-            "_G_CC_SPARSEST": [
-                "PRIMITIVE",
-                "TEXEL0",
-                "LOD_FRACTION",
-                "TEXEL0",
-                "PRIMITIVE",
-                "TEXEL0",
-                "LOD_FRACTION",
-                "TEXEL0",
-            ],
-            "G_CC_TEMPLERP": [
-                "TEXEL1",
-                "TEXEL0",
-                "PRIM_LOD_FRAC",
-                "TEXEL0",
-                "TEXEL1",
-                "TEXEL0",
-                "PRIM_LOD_FRAC",
-                "TEXEL0",
-            ],
-            "G_CC_TRILERP": [
-                "TEXEL1",
-                "TEXEL0",
-                "LOD_FRACTION",
-                "TEXEL0",
-                "TEXEL1",
-                "TEXEL0",
-                "LOD_FRACTION",
-                "TEXEL0",
-            ],
-            "G_CC_INTERFERENCE": ["TEXEL0", "0", "TEXEL1", "0", "TEXEL0", "0", "TEXEL1", "0"],
-            "G_CC_1CYUV2RGB": ["TEXEL0", "K4", "K5", "TEXEL0", "0", "0", "0", "SHADE"],
-            "G_CC_YUV2RGB": ["TEXEL1", "K4", "K5", "TEXEL1", "0", "0", "0", "0"],
-            "G_CC_PASS2": ["0", "0", "0", "COMBINED", "0", "0", "0", "COMBINED"],
-            "G_CC_MODULATEI2": ["COMBINED", "0", "SHADE", "0", "0", "0", "0", "SHADE"],
-            "G_CC_MODULATEIA2": ["COMBINED", "0", "SHADE", "0", "COMBINED", "0", "SHADE", "0"],
-            "G_CC_MODULATERGB2": ["COMBINED", "0", "SHADE", "0", "0", "0", "0", "SHADE"],
-            "G_CC_MODULATERGBA2": ["COMBINED", "0", "SHADE", "0", "COMBINED", "0", "SHADE", "0"],
-            "G_CC_MODULATEI_PRIM2": ["COMBINED", "0", "PRIMITIVE", "0", "0", "0", "0", "PRIMITIVE"],
-            "G_CC_MODULATEIA_PRIM2": ["COMBINED", "0", "PRIMITIVE", "0", "COMBINED", "0", "PRIMITIVE", "0"],
-            "G_CC_MODULATERGB_PRIM2": ["COMBINED", "0", "PRIMITIVE", "0", "0", "0", "0", "PRIMITIVE"],
-            "G_CC_MODULATERGBA_PRIM2": ["COMBINED", "0", "PRIMITIVE", "0", "COMBINED", "0", "PRIMITIVE", "0"],
-            "G_CC_DECALRGB2": ["0", "0", "0", "COMBINED", "0", "0", "0", "SHADE"],
-            "G_CC_BLENDI2": ["ENVIRONMENT", "SHADE", "COMBINED", "SHADE", "0", "0", "0", "SHADE"],
-            "G_CC_BLENDIA2": ["ENVIRONMENT", "SHADE", "COMBINED", "SHADE", "COMBINED", "0", "SHADE", "0"],
-            "G_CC_CHROMA_KEY2": ["TEXEL0", "CENTER", "SCALE", "0", "0", "0", "0", "0"],
-            "G_CC_HILITERGB2": ["ENVIRONMENT", "COMBINED", "TEXEL0", "COMBINED", "0", "0", "0", "SHADE"],
-            "G_CC_HILITERGBA2": [
-                "ENVIRONMENT",
-                "COMBINED",
-                "TEXEL0",
-                "COMBINED",
-                "ENVIRONMENT",
-                "COMBINED",
-                "TEXEL0",
-                "COMBINED",
-            ],
-            "G_CC_HILITERGBDECALA2": ["ENVIRONMENT", "COMBINED", "TEXEL0", "COMBINED", "0", "0", "0", "TEXEL0"],
-            "G_CC_HILITERGBPASSA2": ["ENVIRONMENT", "COMBINED", "TEXEL0", "COMBINED", "0", "0", "0", "COMBINED"],
-        }
-        return GBI_CC_Macros.get(
-            arg[0].strip(), ["TEXEL0", "0", "SHADE", "0", "TEXEL0", "0", "SHADE", "0"]
-        ) + GBI_CC_Macros.get(arg[1].strip(), ["TEXEL0", "0", "SHADE", "0", "TEXEL0", "0", "SHADE", "0"])
+        return self.continue_parse
 
     def eval_dl_segptr(self, num):
         num = int(num)
@@ -365,22 +255,7 @@ class KCS_F3d(DL):
         else:
             return num
 
-    def make_new_mat(self):
-        if self.NewMat:
-            self.NewMat = 0
-            self.Mats.append([len(self.Tris) - 1, self.LastMat])
-            self.LastMat = deepcopy(self.LastMat)  # for safety
-            self.LastMat.name = self.num + 1
-            self.num += 1
-
-    def parse_tri(self, Tri):
-        return [self.VertBuff[a] for a in Tri]
-
-    def strip_args(self, cmd):
-        a = cmd.find("(")
-        return cmd[a + 1 : -2].split(",")
-
-    def apply_f3d_mesh_dat(self, obj, mesh, tex_path):
+    def apply_f3d_mesh_dat(self, obj: bpy.types.Object, mesh: bpy.types.Mesh, tex_path: Path):
         tris = mesh.polygons
         bpy.context.view_layer.objects.active = obj
         ind = -1
@@ -408,7 +283,7 @@ class KCS_F3d(DL):
                     new = len(mesh.materials) - 1
                     mat = mesh.materials[new]
                     mat.name = "KCS F3D Mat {} {}".format(obj.name, new)
-                    self.Mats[new][1].apply_mat_settings(mat, tex_path)
+                    self.Mats[new][1].apply_material_settings(mat, tex_path)
                 else:
                     # I tried to re use mat slots but it is much slower, and not as accurate
                     # idk if I was just doing it wrong or the search is that much slower, but this is easier
@@ -433,12 +308,12 @@ class KCS_F3d(DL):
                     UVmap.data[l].uv[1] = UVmap.data[l].uv[1] * -1 + 1
                     Vcol.data[l].color = [a / 255 for a in vcol]
 
-    def create_new_f3d_mat(self, mat, mesh):
+    def create_new_f3d_mat(self, mat: SM64_Material, mesh: bpy.types.Mesh):
         # check if this mat was used already in another mesh (or this mat if DL is garbage or something)
         # even looping n^2 is probably faster than duping 3 mats with blender speed
         for j, F3Dmat in enumerate(bpy.data.materials):
             if F3Dmat.is_f3d:
-                dupe = mat.math_hash_f3d(F3Dmat.f3d_mat)
+                dupe = mat.mat_hash_f3d(F3Dmat.f3d_mat)
                 if dupe:
                     return F3Dmat
         if mesh.materials:
@@ -731,7 +606,7 @@ class GeoBinary(BinProcess):
                 x += extra
             # adjust vertex pointer so it is an index into vert arr
             if name == "gsSPVertex":
-                args[0] = self.seg2phys(int(args[0]) - 0x20) // 0x10
+                args[0] = str(self.seg2phys(int(args[0]) - 0x20) // 0x10)
             # check for flow control
             if name == "gsSPEndDisplayList":
                 break
@@ -770,7 +645,7 @@ class GeoBinary(BinProcess):
         return cmd[: a.span()[0]], cmd[a.span()[0] + 1 : a.span()[1] - 1].split(",")
 
     def decode_vertices(self, start, end):
-        self.vertices = Vertices(self.scale)
+        self.vertices = Vertices()
         for i in range(start, end, 16):
             v = self.upt(i, ">6h4B", 16)
             self.vertices._make(v)
@@ -782,70 +657,70 @@ class BpyGeo:
         self.rt = rt
         self.scale = scale
 
-    def write_bpy_gfx_from_geo(self, name, cls, tex_path, collection):
+    def apply_mesh_dat_to_obj(self, model_data: KCS_F3d, obj: bpy.types.Object, mesh: bpy.types.Mesh, tex_path: Path, cleanup: bool = True):
+        model_data.apply_f3d_mesh_dat(obj, mesh, tex_path)
+        # cleanup
+        mesh.validate()
+        mesh.update(calc_edges=True)
+        if cleanup:
+            # shade smooth
+            obj.select_set(True)
+            bpy.context.view_layer.objects.active = obj
+            bpy.ops.object.shade_smooth()
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.mesh.remove_doubles()
+            bpy.ops.object.mode_set(mode="OBJECT")
+            
+    def write_bpy_gfx_from_geo(self, name: str, cls: GeoBinary, tex_path: Path, collection: bpy.types.Collection):
         # for now, do basic import, each layout is an object
-        stack = [self.rt]
-        self.LastMat = None
+        transform_stack: list[bpy.types.Object, Matrix] = [[self.rt, transform_mtx_blender_to_n64()]]
+        stack_index = 0 # everything will go on root
+        last_mat = None
         # create dict of models so I can reuse model dat as needed (usually for blocks)
-        Models = dict()
+        parsed_models = dict()
         for i, layout in enumerate(cls.layouts):
             if (layout.depth & 0xFF) == 0x12:
                 break
             # mesh object
             if layout.ptr:
-                prev = Models.get(layout.ptr)
+                prev = parsed_models.get(layout.ptr)
                 # model was already imported, reuse data block with new obj
                 if prev:
-                    mesh, self.LastMat = prev
+                    mesh, last_mat = prev
                 else:
-                    ModelDat = KCS_F3d(lastmat=self.LastMat)
-                    (layout.vertices, layout.Triangles) = ModelDat.get_data_from_dl(cls, layout)
-                    self.LastMat = ModelDat.LastMat
+                    model_data = KCS_F3d(last_mat=last_mat)
+                    (layout.vertices, layout.Triangles) = model_data.get_data_from_dl(cls, layout)
+                    last_mat = model_data.LastMat
                     mesh = bpy.data.meshes.new(f"{name} {layout.depth&0xFF} {i}")
                     mesh.from_pydata(layout.vertices, [], layout.Triangles)
                     # add model to dict
-                    Models[layout.ptr] = (mesh, self.LastMat)
+                    parsed_models[layout.ptr] = (mesh, last_mat)
                 obj = bpy.data.objects.new(f"{name} {layout.depth&0xFF} {i}", mesh)
                 collection.objects.link(obj)
                 # set KCS props of obj
                 obj.KCS_mesh.mesh_type = "Graphics"
-                # apply dat
-                ModelDat.apply_f3d_mesh_dat(obj, mesh, tex_path)
-                # cleanup
-                mesh.validate()
-                mesh.update(calc_edges=True)
-                if bpy.context.scene.KCS_scene.clean_up:
-                    # shade smooth
-                    obj.select_set(True)
-                    bpy.context.view_layer.objects.active = obj
-                    bpy.ops.object.shade_smooth()
-                    bpy.ops.object.mode_set(mode="EDIT")
-                    bpy.ops.mesh.remove_doubles()
-                    bpy.ops.object.mode_set(mode="OBJECT")
+                self.apply_mesh_dat_to_obj(model_data, obj, mesh, tex_path, cleanup = bpy.context.scene.KCS_scene.clean_up)
             # empty transform
             else:
                 obj = make_empty(f"{name} {layout.depth} {i}", "PLAIN_AXES", collection)
                 # set KCS props of obj
                 obj.KCS_mesh.mesh_type = "Graphics"
-            # now that obj is created, parent and add transforms to it
-            if (layout.depth & 0xFF) < len(stack) - 1:
-                stack = stack[: (layout.depth & 0xFF) + 1]
-            parentObject(stack[-1], obj, 0)
-            if (layout.depth & 0xFF) + 1 > len(stack) - 1:
-                stack.append(obj)
-            loc = layout.translation
-            obj.location += Vector(self.vec3s_translate_to_bpy(loc)) / self.scale
-            obj.scale = Vector([1 / a for a in layout.scale])
-            apply_rotation_n64_to_bpy(obj)
-
-    # I'm not really certain about these two transforms, but I like the results they give
-    @staticmethod
-    def vec3s_translate_to_bpy(vec3):
-        return (vec3.x, -vec3.z, vec3.y)
-
-    @staticmethod
-    def vec3s_translate_to_n64(vec3):
-        return (vec3.x, vec3.z, -vec3.y)
+            
+            # set the transform
+            cur_transform = Matrix.LocRotScale(layout.translation, Euler(layout.rotation), layout.scale)
+            
+            # adjust stack
+            if layout.depth >= stack_index:
+                transform_stack.append([])
+                stack_index = layout.depth + 1
+            else:
+                transform_stack = transform_stack[:layout.depth + 2]
+            # change the top of the stack to be the parent @ layout transform
+            cur_transform = transform_stack[stack_index - 1][1] @ cur_transform
+            transform_stack[stack_index] = [obj, cur_transform]
+            
+            parentObject(transform_stack[stack_index - 1][0], obj, keep=1)
+            obj.matrix_world = transform_matrix_to_bpy(cur_transform) * (1/self.scale)
 
     # create the fModel cls and populate it with layouts based on child objects
     def init_fModel_from_bpy(self):
@@ -1117,7 +992,7 @@ class KCS_fMesh(FMesh, BinWrite):
         self.symbol_init()
 
     # after each triGroup is added to fMesh.draw, add the DPSetTextureImage as pointer targets, and add the pointer objects to img refs
-    def onTriGroupBleedEnd(self, f3d: F3D, triGroup: FTriGroup, lastMat: FMaterial, bleed: BleedGfx):
+    def onTriGroupBleedEnd(self, f3d: F3D, triGroup: FTriGroup, last_mat: FMaterial, bleed: BleedGfx):
         for tile, texGfx in enumerate(bleed.bled_tex):
             set_tex = (c for c in texGfx.commands if type(c) == DPSetTextureImage)
             for set_img in set_tex:

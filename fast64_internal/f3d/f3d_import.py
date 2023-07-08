@@ -12,12 +12,27 @@ from mathutils import Vector, Euler, Matrix
 from collections import namedtuple
 from dataclasses import dataclass
 from copy import deepcopy
+from re import findall
+from numbers import Number
+from collections.abc import Sequence
+
+from ..f3d.f3d_material import F3DMaterialProperty, RDPSettings, TextureProperty
 
 from ..utility import hexOrDecInt
+from ..utility_importer import *
 
 # ------------------------------------------------------------------------
 #    Classes
 # ------------------------------------------------------------------------
+
+# will format light struct data passed
+class Lights1:
+    def __init__(self, name: str, data_str: str):
+        self.name = name
+        data = [eval(dat.strip()) for dat in data_str.split(",")]
+        self.ambient = [*data[0:3], 0xFF]
+        self.diffuse = [*data[3:6], 0xFF]
+        self.direction = data[9:12]
 
 
 # this will hold tile properties
@@ -62,10 +77,13 @@ class Mat:
         self.tiles = [Tile() for a in range(8)]
         self.tex0 = None
         self.tex1 = None
-        self.tx_scr = None
+        self.num_lights = 1
+        self.other_mode = dict()
+        self.light_col = dict()
+        self.ambient_light = tuple()
 
     # calc the hash for an f3d mat and see if its equal to this mats hash
-    def math_hash_f3d(self, f3d):
+    def mat_hash_f3d(self, f3d: F3DMaterialProperty):
         # texture,1 cycle combiner, render mode, geo modes, some other blender settings, tile size (very important in kirby64)
         rdp = f3d.rdp_settings
         if f3d.tex0.tex:
@@ -135,13 +153,13 @@ class Mat:
             return dupe
         return False
 
-    def mat_hash(self, mat):
+    def mat_hash(self, mat: bpy.types.Material):
         return False
 
-    def convert_color(self, color):
+    def convert_color(self, color: Sequence[Number]):
         return [int(a) / 255 for a in color]
 
-    def load_texture(self, ForceNewTex, path, tex):
+    def load_texture(self, ForceNewTex: bool, path: Path, tex: Texture):
         png = path / f"bank_{tex.Timg[0]}" / f"{tex.Timg[1]}"
         png = (*png.glob("*.png"),)
         if png:
@@ -151,27 +169,44 @@ class Mat:
             else:
                 return i
 
-    def apply_PBSDF_mat(self, mat):
+    def apply_PBSDF_Mat(self, mat: bpy.types.Material, tex_path: Path, tex: Texture):
         nt = mat.node_tree
         nodes = nt.nodes
         links = nt.links
         pbsdf = nodes.get("Principled BSDF")
         if not pbsdf:
             return
-        tex = nodes.new("ShaderNodeTexImage")
-        links.new(pbsdf.inputs[0], tex.outputs[0])
-        links.new(pbsdf.inputs[19], tex.outputs[1])
-        i = self.load_texture(0, path)
-        if i:
-            tex.image = i
+        tex_node = nodes.new("ShaderNodeTexImage")
+        links.new(pbsdf.inputs[0], tex_node.outputs[0])  # base color
+        links.new(pbsdf.inputs[21], tex_node.outputs[1])  # alpha color
+        image = self.LoadTexture(0, tex_path, tex)
+        if image:
+            tex_node.image = image
 
-    def apply_mat_settings(self, mat, tex_path):
-        #        if bpy.context.scene.LevelImp.AsObj:
-        #            return self.apply_PBSDF_mat(mat, textures, path, layer)
+    def apply_material_settings(self, mat: bpy.types.Material, tex_path: Path):
+        f3d = mat.f3d_mat
 
-        f3d = mat.f3d_mat  # This is kure's custom property class for materials
+        self.set_register_settings(mat, f3d)
+        self.set_textures(f3d, tex_path)
 
-        # set color registers if they exist
+        with bpy.context.temp_override(material=mat):
+            bpy.ops.material.update_f3d_nodes()
+
+    def set_register_settings(self, mat: bpy.types.Material, f3d: F3DMaterialProperty):
+        self.set_fog(f3d)
+        self.set_color_registers(f3d)
+        self.set_geo_mode(f3d.rdp_settings, mat)
+        self.set_combiner(f3d)
+        self.set_render_mode(f3d)
+
+    def set_textures(self, f3d: F3DMaterialProperty, tex_path: Path):
+        self.set_tex_scale(f3d)
+        if self.tex0 and self.set_tex:
+            self.set_tex_settings(f3d.tex0, self.load_texture(0, tex_path, self.tex0), self.tiles[0], self.tex0.Timg)
+        if self.tex1 and self.set_tex:
+            self.set_tex_settings(f3d.tex1, self.load_texture(0, tex_path, self.tex1), self.tiles[1], self.tex1.Timg)
+
+    def set_fog(self, f3d: F3DMaterialProperty):
         if hasattr(self, "fog_position"):
             f3d.set_fog = True
             f3d.use_global_fog = False
@@ -181,11 +216,16 @@ class Mat:
             f3d.set_fog = True
             f3d.use_global_fog = False
             f3d.fog_color = self.convert_color(self.fog_color)
-        if hasattr(self, "light_col"):
+
+    def set_color_registers(self, f3d: F3DMaterialProperty):
+        if self.ambient_light:
+            f3d.set_ambient_from_light = False
+            f3d.ambient_light_color = self.convert_color(self.ambient_light)
+        if self.light_col:
             # this is a dict but I'll only use the first color for now
             f3d.set_lights = True
             if self.light_col.get(1):
-                f3d.default_light_color = self.convert_color(eval(self.light_col[1]).to_bytes(4, "big"))
+                f3d.default_light_color = self.convert_color(self.light_col[1])
         if hasattr(self, "env_color"):
             f3d.set_env = True
             f3d.env_color = self.convert_color(self.env_color[-4:])
@@ -195,121 +235,60 @@ class Mat:
             f3d.prim_lod_min = int(prim[0])
             f3d.prim_lod_frac = int(prim[1])
             f3d.prim_color = self.convert_color(prim[-4:])
-        # I set these but they aren't properly stored because they're reset by fast64 or something
-        # its better to have defaults than random 2 cycles
-        self.set_geo_mode(f3d.rdp_settings, mat)
+        if hasattr(self, "blend_color"):
+            f3d.set_blend = True
+            f3d.blend_color = self.convert_color(self.blend_color[-4:])
 
-        if self.TwoCycle:
-            f3d.rdp_settings.g_mdsft_cycletype = "G_CYC_2CYCLE"
-        else:
-            f3d.rdp_settings.g_mdsft_cycletype = "G_CYC_1CYCLE"
-
-        # make combiner custom
-        f3d.presetName = "Custom"
-        self.set_combiner(f3d)
-        # add tex scroll objects, make this a callback
-        if self.tx_scr:
-            scr = self.tx_scr
-            mat_scr = mat.KCS_tx_scroll
-            if hasattr(scr, "textures"):
-                [mat_scr.add_texture(t) for t in scr.textures]
-            if hasattr(scr, "palettes"):
-                [mat_scr.add_palette(t) for t in scr.palettes]
-        # deal with custom render modes
-        if hasattr(self, "RenderMode"):
-            self.set_render_mode(f3d)
-        # g texture handle
+    def set_tex_scale(self, f3d: F3DMaterialProperty):
         if hasattr(self, "set_tex"):
             # not exactly the same but gets the point across maybe?
             f3d.tex0.tex_set = self.set_tex
             f3d.tex1.tex_set = self.set_tex
             # tex scale gets set to 0 when textures are disabled which is automatically done
             # often to save processing power between mats or something, or just adhoc bhv
+            # though in fast64, we don't want to ever set it to zero
             if f3d.rdp_settings.g_tex_gen or any([a < 1 and a > 0 for a in self.tex_scale]):
                 f3d.scale_autoprop = False
                 f3d.tex_scale = self.tex_scale
-                print(self.tex_scale)
-            if not self.set_tex:
-                # Update node values
-                override = bpy.context.copy()
-                override["material"] = mat
-                bpy.ops.material.update_f3d_nodes(override)
-                del override
-                return
-        # texture 0 then texture 1
-        if self.tex0:
-            i = self.load_texture(0, tex_path, self.tex0)
-            tex0 = f3d.tex0
-            tex0.tex_reference = str(self.tex0.Timg)  # setting prop for hash purposes
-            tex0.tex_set = True
-            tex0.tex = i
-            tex0.tex_format = self.eval_tile_fmt(self.tiles[0])
-            tex0.autoprop = False
-            Sflags = self.eval_tile_flags(self.tiles[0].Sflags)
-            for f in Sflags:
-                setattr(tex0.S, f, True)
-            Tflags = self.eval_tile_flags(self.tiles[0].Tflags)
-            for f in Sflags:
-                setattr(tex0.T, f, True)
-            tex0.S.low = self.tiles[0].Slow
-            tex0.T.low = self.tiles[0].Tlow
-            tex0.S.high = self.tiles[0].Shigh
-            tex0.T.high = self.tiles[0].Thigh
 
-            tex0.S.mask = self.tiles[0].SMask
-            tex0.T.mask = self.tiles[0].TMask
-        if self.tex1:
-            i = self.load_texture(0, tex_path, self.tex1)
-            tex1 = f3d.tex1
-            tex1.tex_reference = str(self.tex1.Timg)  # setting prop for hash purposes
-            tex1.tex_set = True
-            tex1.tex = i
-            tex1.tex_format = self.eval_tile_fmt(self.tiles[1])
-            Sflags = self.eval_tile_flags(self.tiles[1].Sflags)
-            for f in Sflags:
-                setattr(tex1.S, f, True)
-            Tflags = self.eval_tile_flags(self.tiles[1].Tflags)
-            for f in Sflags:
-                setattr(tex1.T, f, True)
-            tex1.S.low = self.tiles[1].Slow
-            tex1.T.low = self.tiles[1].Tlow
-            tex1.S.high = self.tiles[1].Shigh
-            tex1.T.high = self.tiles[1].Thigh
+    def set_tex_settings(
+        self, tex_prop: TextureProperty, image: bpy.types.Image, tile: Tile, tex_img: Union[Sequence, str]
+    ):
+        tex_prop.tex_reference = str(tex_img)  # setting prop for hash purposes
+        tex_prop.tex_set = True
+        tex_prop.tex = image
+        tex_prop.tex_format = self.eval_texture_format(tile)
+        Sflags = self.eval_tile_flags(tile.Sflags)
+        for f in Sflags:
+            setattr(tex_prop.S, f, True)
+        Tflags = self.eval_tile_flags(tile.Tflags)
+        for f in Sflags:
+            setattr(tex_prop.T, f, True)
+        tex_prop.S.low = tile.Slow
+        tex_prop.T.low = tile.Tlow
+        tex_prop.S.high = tile.Shigh
+        tex_prop.T.high = tile.Thigh
+        tex_prop.S.mask = tile.SMask
+        tex_prop.T.mask = tile.TMask
 
-            tex1.S.mask = self.tiles[0].SMask
-            tex1.T.mask = self.tiles[0].TMask
-        # Update node values
-        override = bpy.context.copy()
-        override["material"] = mat
-        bpy.ops.material.update_f3d_nodes(override)
-        del override
+    # rework with combinatoric render mode draft PR
+    def set_render_mode(self, f3d: F3DMaterialProperty):
+        rdp = f3d.rdp_settings
+        if self.TwoCycle:
+            rdp.g_mdsft_cycletype = "G_CYC_2CYCLE"
+        else:
+            rdp.g_mdsft_cycletype = "G_CYC_1CYCLE"
+        if hasattr(self, "RenderMode"):
+            rdp.set_rendermode = True
+            # if the enum isn't there, then just print an error for now
+            try:
+                rdp.rendermode_preset_cycle_1 = self.RenderMode[0]
+                rdp.rendermode_preset_cycle_2 = self.RenderMode[1]
+                # print(f"set render modes with render mode {self.RenderMode}")
+            except:
+                print(f"could not set render modes with render mode {self.RenderMode}")
 
-    def eval_tile_flags(self, flags):
-        if not flags:
-            return []
-        GBIflags = {
-            "G_TX_NOMIRROR": None,
-            "G_TX_WRAP": None,
-            "G_TX_MIRROR": ("mirror"),
-            "G_TX_CLAMP": ("clamp"),
-            "0": None,
-            "1": ("mirror"),
-            "2": ("clamp"),
-            "3": ("clamp", "mirror"),
-        }
-        x = []
-        fsplit = flags.split("|")
-        for f in fsplit:
-            z = GBIflags.get(f.strip(), 0)
-            if z:
-                x.append(z)
-        return x
-
-    def set_render_mode(self, f3d):
-        f3d.rdp_settings.render_mode.set_rendermode = True
-        f3d.rdp_settings.render_mode.set_render_mode(self.RenderMode[0], self.RenderMode[1])
-
-    def set_geo_mode(self, rdp, mat):
+    def set_geo_mode(self, rdp: RDPSettings, mat: bpy.types.Material):
         # texture gen has a different name than gbi
         for a in self.GeoSet:
             setattr(rdp, a.replace("G_TEXTURE_GEN", "G_TEX_GEN").lower().strip(), True)
@@ -317,7 +296,8 @@ class Mat:
             setattr(rdp, a.replace("G_TEXTURE_GEN", "G_TEX_GEN").lower().strip(), False)
 
     # Very lazy for now
-    def set_combiner(self, f3d):
+    def set_combiner(self, f3d: F3DMaterialProperty):
+        f3d.presetName = "Custom"
         if not hasattr(self, "Combiner"):
             f3d.combiner1.A = "TEXEL0"
             f3d.combiner1.A_alpha = "0"
@@ -342,8 +322,29 @@ class Mat:
             f3d.combiner2.B_alpha = self.Combiner[13]
             f3d.combiner2.C_alpha = self.Combiner[14]
             f3d.combiner2.D_alpha = self.Combiner[15]
+    
+    def eval_tile_flags(self, flags: str):
+        if not flags:
+            return []
+        GBIflags = {
+            "G_TX_NOMIRROR": None,
+            "G_TX_WRAP": None,
+            "G_TX_MIRROR": ("mirror"),
+            "G_TX_CLAMP": ("clamp"),
+            "0": None,
+            "1": ("mirror"),
+            "2": ("clamp"),
+            "3": ("clamp", "mirror"),
+        }
+        x = []
+        fsplit = flags.split("|")
+        for f in fsplit:
+            z = GBIflags.get(f.strip(), 0)
+            if z:
+                x.append(z)
+        return x
 
-    def eval_tile_fmt(self, tex):
+    def eval_texture_format(self, tex: Texture):
         GBIfmts = {
             "G_IM_FMT_RGBA": "RGBA",
             "RGBA": "RGBA",
@@ -374,98 +375,213 @@ class Mat:
 # handles DL import processing, specifically built to process each cmd into the mat class
 # should be inherited into a larger F3d class which wraps DL processing
 # does not deal with flow control or gathering the data containers (VB, Geo cls etc.)
-class DL:
+class DL(DataParser):
     # the min needed for this class to work for importing
     def __init__(self, lastmat=None):
-        self.VB = {}
+        self.Vtx = {}
         self.Gfx = {}
-        self.diff = {}
-        self.amb = {}
-        self.Lights = {}
+        self.Light_t = {}
+        self.Ambient_t = {}
+        self.Lights1 = {}
+        self.Textures = {}
+        self.NewMat = 1
         if not lastmat:
             self.LastMat = Mat()
             self.LastMat.name = 0
         else:
             self.LastMat = lastmat
+        super().__init__()
 
-    # DL cmds that control the flow of a DL cannot be handled within a independent	#class method without larger context of the total DL
-    # def gsSPEndDisplayList():
-    # return
-    # def gsSPBranchList():
-    # break
-    # def gsSPDisplayList():
-    # continue
+    def gsSPEndDisplayList(self, macro: Macro):
+        return self.break_parse
 
-    # Vertices are not currently handled in the base class
+    def gsSPBranchList(self, macro: Macro):
+        NewDL = self.Gfx.get(branched_dl := macro.args[0])
+        if not NewDL:
+            raise Exception(
+                "Could not find DL {} in levels/{}/{}leveldata.inc.c".format(
+                    NewDL, self.scene.LevelImp.Level, self.scene.LevelImp.Prefix
+                )
+            )
+        self.reset_parser(branched_dl)
+        self.parse_stream(NewDL, branched_dl)
+        return self.break_parse
 
-    # Triangles
-    def gsSP2Triangles(self, args):
-        self.make_new_mat()
-        args = [hexOrDecInt(a) for a in args]
+    def gsSPDisplayList(self, macro: Macro):
+        NewDL = self.Gfx.get(branched_dl := macro.args[0])
+        if not NewDL:
+            raise Exception(
+                "Could not find DL {} in levels/{}/{}leveldata.inc.c".format(
+                    NewDL, self.scene.LevelImp.Level, self.scene.LevelImp.Prefix
+                )
+            )
+        self.reset_parser(branched_dl)
+        self.parse_stream(NewDL, branched_dl)
+        return self.continue_parse
+
+    def gsSPVertex(self, macro: Macro):
+        # vertex references commonly use pointer arithmatic. I will deal with that case here, but not for other things unless it somehow becomes a problem later
+        if "+" in macro.args[0]:
+            ref, offset = macro.args[0].split("+")
+            offset = hexOrDecInt(offset)
+        else:
+            ref = macro.args[0]
+            offset = 0
+        VB = self.Vtx.get(ref)
+        if not VB:
+            raise Exception(
+                "Could not find VB {} in levels/{}/{}leveldata.inc.c".format(
+                    ref, self.scene.LevelImp.Level, self.scene.LevelImp.Prefix
+                )
+            )
+        vertex_load_start = hexOrDecInt(macro.args[2])
+        vertex_load_length = hexOrDecInt(macro.args[1])
+        Verts = VB[
+            offset : offset + vertex_load_length
+        ]  # If you use array indexing here then you deserve to have this not work
+        Verts = [self.parse_vert(v) for v in Verts]
+        for k, i in enumerate(range(vertex_load_start, vertex_load_length, 1)):
+            self.VertBuff[i] = [Verts[k], vertex_load_start]
+        # These are all independent data blocks in blender
+        self.Verts.extend([v[0] for v in Verts])
+        self.UVs.extend([v[1] for v in Verts])
+        self.VCs.extend([v[2] for v in Verts])
+        self.LastLoad = vertex_load_length
+        return self.continue_parse
+
+    def gsSP2Triangles(self, macro: Macro):
+        self.make_new_material()
+        args = [hexOrDecInt(a) for a in macro.args]
         Tri1 = self.parse_tri(args[:3])
         Tri2 = self.parse_tri(args[4:7])
         self.Tris.append(Tri1)
         self.Tris.append(Tri2)
+        return self.continue_parse
 
-    def gsSP1Triangle(self, args):
-        self.make_new_mat()
-        args = [hexOrDecInt(a) for a in args]
+    def gsSP1Triangle(self, macro: Macro):
+        self.make_new_material()
+        args = [hexOrDecInt(a) for a in macro.args]
         Tri = self.parse_tri(args[:3])
         self.Tris.append(Tri)
+        return self.continue_parse
 
     # materials
     # Mats will be placed sequentially. The first item of the list is the triangle number
     # The second is the material class
-    def gsDPSetRenderMode(self, args):
+    def gsDPSetRenderMode(self, macro: Macro):
         self.NewMat = 1
-        self.LastMat.RenderMode = [a.strip() for a in args]
+        self.LastMat.RenderMode = [a.strip() for a in macro.args]
+        return self.continue_parse
 
-    def gsDPSetFogColor(self, args):
+    # The highest numbered light is always the ambient light
+    def gsSPLight(self, macro: Macro):
         self.NewMat = 1
-        self.LastMat.fog_color = args
+        light = re.search("&.+\.", macro.args[0]).group()[1:-1]
+        light = Lights1(light, self.Lights1.get(light)[0])
+        if ".a" in macro.args[0]:
+            self.LastMat.ambient_light = light.ambient
+        else:
+            num = re.search("_\d", macro.args[0]).group()[1]
+            if not num:
+                num = 1
+            self.LastMat.light_col[num] = light.diffuse
+        return self.continue_parse
 
-    def gsSPFogPosition(self, args):
+    # numlights0 still gives one ambient and diffuse light
+    def gsSPNumLights(self, macro: Macro):
         self.NewMat = 1
-        self.LastMat.fog_pos = args
+        num = re.search("_\d", macro.args[0]).group()[1]
+        if not num:
+            num = 1
+        self.LastMat.num_lights = num
+        return self.continue_parse
 
-    def gsSPLightColor(self, args):
+    def gsSPLightColor(self, macro: Macro):
         self.NewMat = 1
-        if not hasattr(self.LastMat, "light_col"):
-            self.LastMat.light_col = {}
-        num = re.search("_\d", args[0]).group()[1]
-        self.LastMat.light_col[num] = args[-1]
+        num = re.search("_\d", macro.args[0]).group()[1]
+        if not num:
+            num = 1
+        self.LastMat.light_col[num] = eval(macro.args[-1]).to_bytes(4, "big")
+        return self.continue_parse
 
-    def gsDPSetPrimColor(self, args):
-        self.NewMat = 1
-        self.LastMat.prim_color = args
+    def gsSPSetLights0(self, macro: Macro):
+        return self.continue_parse
 
-    def gsDPSetEnvColor(self, args):
+    # not finished yet
+    def gsSPSetLights1(self, macro: Macro):
+        return self.continue_parse
+
+    def gsSPSetLights2(self, macro: Macro):
+        return self.continue_parse
+
+    def gsSPSetLights3(self, macro: Macro):
+        return self.continue_parse
+
+    def gsSPSetLights4(self, macro: Macro):
+        return self.continue_parse
+
+    def gsSPSetLights5(self, macro: Macro):
+        return self.continue_parse
+
+    def gsSPSetLights6(self, macro: Macro):
+        return self.continue_parse
+
+    def gsSPSetLights7(self, macro: Macro):
+        return self.continue_parse
+
+    def gsSPFogFactor(self, macro: Macro):
+        return self.continue_parse
+
+    def gsDPSetFogColor(self, macro: Macro):
         self.NewMat = 1
-        self.LastMat.env_color = args
+        self.LastMat.fog_color = macro.args
+        return self.continue_parse
+
+    def gsSPFogPosition(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.fog_pos = macro.args
+        return self.continue_parse
+
+    def gsDPSetPrimColor(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.prim_color = macro.args
+        return self.continue_parse
+
+    def gsDPSetEnvColor(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.env_color = macro.args
+        return self.continue_parse
+        
+    def gsDPSetBlendColor(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.blend_color = macro.args
+        return self.continue_parse
 
     # multiple geo modes can happen in a row that contradict each other
     # this is mostly due to culling wanting diff geo modes than drawing
     # but sometimes using the same vertices
-    def gsSPClearGeometryMode(self, args):
+    def gsSPClearGeometryMode(self, macro: Macro):
         self.NewMat = 1
-        args = [a.strip() for a in args[0].split("|")]
+        args = [a.strip() for a in macro.args[0].split("|")]
         for a in args:
             if a in self.LastMat.GeoSet:
                 self.LastMat.GeoSet.remove(a)
         self.LastMat.GeoClear.extend(args)
+        return self.continue_parse
 
-    def gsSPSetGeometryMode(self, args):
+    def gsSPSetGeometryMode(self, macro: Macro):
         self.NewMat = 1
-        args = [a.strip() for a in args[0].split("|")]
+        args = [a.strip() for a in macro.args[0].split("|")]
         for a in args:
             if a in self.LastMat.GeoClear:
                 self.LastMat.GeoClear.remove(a)
         self.LastMat.GeoSet.extend(args)
+        return self.continue_parse
 
-    def gsSPGeometryMode(self, args):
+    def gsSPGeometryMode(self, macro: Macro):
         self.NewMat = 1
-        argsC = [a.strip() for a in args[0].split("|")]
-        argsS = [a.strip() for a in args[1].split("|")]
+        argsC = [a.strip() for a in macro.args[0].split("|")]
+        argsS = [a.strip() for a in macro.args[1].split("|")]
         for a in argsC:
             if a in self.LastMat.GeoSet:
                 self.LastMat.GeoSet.remove(a)
@@ -474,39 +590,100 @@ class DL:
                 self.LastMat.GeoClear.remove(a)
         self.LastMat.GeoClear.extend(argsC)
         self.LastMat.GeoSet.extend(argsS)
+        return self.continue_parse
 
-    def gsDPSetCycleType(self, args):
-        if "G_CYC_1CYCLE" in args[0]:
+    def gsDPSetCycleType(self, macro: Macro):
+        if "G_CYC_1CYCLE" in macro.args[0]:
             self.LastMat.TwoCycle = False
-        if "G_CYC_2CYCLE" in args[0]:
+        if "G_CYC_2CYCLE" in macro.args[0]:
             self.LastMat.TwoCycle = True
+        return self.continue_parse
 
-    def gsDPSetCombineMode(self, args):
+    def gsDPSetCombineMode(self, macro: Macro):
         self.NewMat = 1
-        self.LastMat.Combiner = self.EvalCombiner(args)
+        self.LastMat.Combiner = self.eval_set_combine_macro(macro.args)
+        return self.continue_parse
 
-    def gsDPSetCombineLERP(self, args):
+    def gsDPSetCombineLERP(self, macro: Macro):
         self.NewMat = 1
-        self.LastMat.Combiner = [a.strip() for a in args]
+        self.LastMat.Combiner = macro.args
+        return self.continue_parse
+    
+    # some independent other mode settings
+    def gsDPSetTexturePersp(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_textpersp"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPSetDepthSource(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_zsrcsel"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPSetColorDither(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_rgb_dither"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPSetAlphaDither(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_alpha_dither"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPSetCombineKey(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_combkey"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPSetTextureConvert(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_textconv"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPSetTextureFilter(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_text_filt"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPSetTextureLOD(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_textlod"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPSetTextureDetail(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_textdetail"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPPipelineMode(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_pipeline"] = macro.args[0]
+        return self.continue_parse
+        
+    def gsDPSetAlphaCompare(self, macro: Macro):
+        self.NewMat = 1
+        self.LastMat.other_mode["g_mdsft_alpha_compare"] = macro.args[0]
+        return self.continue_parse
 
     # root tile, scale and set tex
-    def gsSPTexture(self, args):
+    def gsSPTexture(self, macro: Macro):
         self.NewMat = 1
         macros = {
             "G_ON": 2,
             "G_OFF": 0,
         }
-        set_tex = macros.get(args[-1].strip())
+        set_tex = macros.get(macro.args[-1])
         if set_tex == None:
-            set_tex = hexOrDecInt(args[-1].strip())
+            set_tex = hexOrDecInt(macro.args[-1])
         self.LastMat.set_tex = set_tex == 2
         self.LastMat.tex_scale = [
-            ((0x10000 * (hexOrDecInt(a) < 0)) + hexOrDecInt(a)) / 0xFFFF for a in args[0:2]
+            ((0x10000 * (hexOrDecInt(a) < 0)) + hexOrDecInt(a)) / 0xFFFF for a in macro.args[0:2]
         ]  # signed half to unsigned half
-        self.LastMat.tile_root = self.eval_tile_macros(args[-2].strip())  # I don't think I'll actually use this
+        self.LastMat.tile_root = self.eval_tile_enum(macro.args[-2])  # I don't think I'll actually use this
+        return self.continue_parse
 
     # last tex is a palette
-    def gsDPLoadTLUT(self, args):
+    def gsDPLoadTLUT(self, macro: Macro):
         try:
             tex = self.LastMat.loadtex
             self.LastMat.pal = tex
@@ -517,15 +694,29 @@ class DL:
                 "No interpretation on file possible**--"
             )
             return None
+        return self.continue_parse
+        
+    def gsDPLoadTLUTCmd(self, macro: Macro):
+        try:
+            tex = self.LastMat.loadtex
+            self.LastMat.pal = tex
+        except:
+            print(
+                "**--Load block before set t img, DL is partial and missing context"
+                "likely static file meant to be used as a piece of a realtime system.\n"
+                "No interpretation on file possible**--"
+            )
+            return None
+        return self.continue_parse
 
     # tells us what tile the last loaded mat goes into
-    def gsDPLoadBlock(self, args):
+    def gsDPLoadBlock(self, macro: Macro):
         try:
             tex = self.LastMat.loadtex
             # these values aren't necessary when the texture is already in png format
             # tex.dxt = hexOrDecInt(args[4])
             # tex.texels = hexOrDecInt(args[3])
-            tile = self.eval_tile_macros(args[0])
+            tile = self.eval_tile_enum(macro.args[0])
             tex.tile = tile
             if tile == 7:
                 self.LastMat.tex0 = tex
@@ -538,56 +729,77 @@ class DL:
                 "No interpretation on file possible**--"
             )
             return None
+        return self.continue_parse
 
-    def gsDPSetTextureImage(self, args):
+    def gsDPSetTextureImage(self, macro: Macro):
         self.NewMat = 1
-        Timg = args[3].strip()
-        Fmt = args[1].strip()
-        Siz = args[2].strip()
+        Timg = macro.args[3]
+        Fmt = macro.args[1]
+        Siz = macro.args[2]
         loadtex = Texture(Timg, Fmt, Siz)
         self.LastMat.loadtex = loadtex
+        return self.continue_parse
 
-    def gsDPSetTileSize(self, args):
+    def gsDPSetTileSize(self, macro: Macro):
         self.NewMat = 1
-        tile = self.LastMat.tiles[self.eval_tile_macros(args[0])]
-        tile.Slow = self.eval_tile_im_frac(args[1].strip())
-        tile.Tlow = self.eval_tile_im_frac(args[2].strip())
-        tile.Shigh = self.eval_tile_im_frac(args[3].strip())
-        tile.Thigh = self.eval_tile_im_frac(args[4].strip())
+        tile = self.LastMat.tiles[self.eval_tile_enum(macro.args[0])]
+        tile.Slow = self.eval_image_frac(macro.args[1])
+        tile.Tlow = self.eval_image_frac(macro.args[2])
+        tile.Shigh = self.eval_image_frac(macro.args[3])
+        tile.Thigh = self.eval_image_frac(macro.args[4])
+        return self.continue_parse
 
-    def gsDPSetTile(self, args):
+    def gsDPSetTile(self, macro: Macro):
         self.NewMat = 1
-        tile = self.LastMat.tiles[self.eval_tile_macros(args[4])]
-        tile.Fmt = args[0].strip()
-        tile.Siz = args[1].strip()
-        tile.Tflags = args[6].strip()
-        tile.TMask = self.eval_tile_macros(args[7].strip())
-        tile.TShift = self.eval_tile_macros(args[8].strip())
-        tile.Sflags = args[9].strip()
-        tile.SMask = self.eval_tile_macros(args[10].strip())
-        tile.SShift = self.eval_tile_macros(args[11].strip())
+        tile = self.LastMat.tiles[self.eval_tile_enum(macro.args[4].strip())]
+        tile.Fmt = macro.args[0].strip()
+        tile.Siz = macro.args[1].strip()
+        tile.Tflags = macro.args[6].strip()
+        tile.TMask = self.eval_tile_enum(macro.args[7])
+        tile.TShift = self.eval_tile_enum(macro.args[8])
+        tile.Sflags = macro.args[9].strip()
+        tile.SMask = self.eval_tile_enum(macro.args[10])
+        tile.SShift = self.eval_tile_enum(macro.args[11])
+        return self.continue_parse
 
-    def make_new_mat(self):
+    # syncs need no processing
+    def gsDPPipeSync(self, macro: Macro):
+        return self.continue_parse
+
+    def gsDPLoadSync(self, macro: Macro):
+        return self.continue_parse
+
+    def gsDPTileSync(self, macro: Macro):
+        return self.continue_parse
+
+    def gsDPFullSync(self, macro: Macro):
+        return self.continue_parse
+
+    def gsSPCullDisplayList(self, macro: Macro):
+        return self.continue_parse
+        
+    def gsDPSetTextureLUT(self, macro: Macro):
+        return self.continue_parse
+        
+    def gsDPNoOp(self, macro: Macro):
+        return self.continue_parse
+
+    def make_new_material(self):
         if self.NewMat:
             self.NewMat = 0
             self.Mats.append([len(self.Tris) - 1, self.LastMat])
             self.LastMat = deepcopy(self.LastMat)  # for safety
-            self.LastMat.name = self.num + 1
-            if self.LastMat.tx_scr:
-                # I'm clearing here because I did some illegal stuff a bit before, temporary (maybe)
-                self.LastMat.tx_scr = None
-            self.num += 1
-
-    def parse_tri(self, Tri):
+   
+    def parse_tri(self, Tri: Sequence[int]):
         return [self.VertBuff[a] for a in Tri]
 
-    def eval_tile_im_frac(self, arg):
+    def eval_image_frac(self, arg: Union[str, Number]):
         if type(arg) == int:
             return arg
         arg2 = arg.replace("G_TEXTURE_IMAGE_FRAC", "2")
         return eval(arg2)
 
-    def eval_tile_macros(self, arg):
+    def eval_tile_enum(self, arg: Union[str, Number]):
         # only 0 and 7 have enums, other stuff just uses int (afaik)
         Tiles = {
             "G_TX_LOADTILE": 7,
@@ -600,7 +812,7 @@ class DL:
             t = hexOrDecInt(arg)
         return t
 
-    def EvalCombiner(self, arg):
+    def eval_set_combine_macro(self, arg: str):
         # two args
         GBI_CC_Macros = {
             "G_CC_PRIMITIVE": ["0", "0", "0", "PRIMITIVE", "0", "0", "0", "PRIMITIVE"],
@@ -710,5 +922,5 @@ class DL:
             "G_CC_HILITERGBPASSA2": ["ENVIRONMENT", "COMBINED", "TEXEL0", "COMBINED", "0", "0", "0", "COMBINED"],
         }
         return GBI_CC_Macros.get(
-            arg[0].strip(), ["TEXEL0", "0", "SHADE", "0", "TEXEL0", "0", "SHADE", "0"]
-        ) + GBI_CC_Macros.get(arg[1].strip(), ["TEXEL0", "0", "SHADE", "0", "TEXEL0", "0", "SHADE", "0"])
+            arg[0], ["TEXEL0", "0", "SHADE", "0", "TEXEL0", "0", "SHADE", "0"]
+        ) + GBI_CC_Macros.get(arg[1], ["TEXEL0", "0", "SHADE", "0", "TEXEL0", "0", "SHADE", "0"])
