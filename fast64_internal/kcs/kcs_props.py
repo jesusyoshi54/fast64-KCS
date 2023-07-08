@@ -93,6 +93,7 @@ class KCS_Scene_Props(PropertyGroup):
         name="Format", description="The file format for data", items=[("binary", "binary", ""), ("C", "C", "")]
     )
     clean_up: BoolProperty(name="Clean Up", description="Post process imports to be cleaner", default=True)
+    import_armature: BoolProperty(name="Import Armature", description="Import Gfx as an Armature insted of an Ojbect hierarchy", default=True)
     use_collections: BoolProperty(name="Use Collections", description="Places imports into their own collection based on general type", default=True)
 
 

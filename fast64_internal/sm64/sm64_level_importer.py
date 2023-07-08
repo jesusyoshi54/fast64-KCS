@@ -44,6 +44,7 @@ from ..utility import (
     transform_mtx_blender_to_n64,
     rotate_quat_n64_to_blender,
     rotate_object,
+    get_enums_from_prop,
     parentObject,
     create_collection,
 )

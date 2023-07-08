@@ -12,7 +12,6 @@ from mathutils import Vector, Euler, Matrix
 from collections import namedtuple
 from dataclasses import dataclass
 from copy import deepcopy
-from re import findall
 from numbers import Number
 from collections.abc import Sequence
 
@@ -406,6 +405,18 @@ class DL(DataParser):
         self.reset_parser(branched_dl)
         self.parse_stream(NewDL, branched_dl)
         return self.break_parse
+        
+    def gsSPBranchLessZraw(self, macro: Macro):
+        NewDL = self.Gfx.get(branched_dl := macro.args[0])
+        if not NewDL:
+            raise Exception(
+                "Could not find DL {} in levels/{}/{}leveldata.inc.c".format(
+                    NewDL, self.scene.LevelImp.Level, self.scene.LevelImp.Prefix
+                )
+            )
+        self.reset_parser(branched_dl)
+        self.parse_stream(NewDL, branched_dl)
+        return self.continue_parse
 
     def gsSPDisplayList(self, macro: Macro):
         NewDL = self.Gfx.get(branched_dl := macro.args[0])
