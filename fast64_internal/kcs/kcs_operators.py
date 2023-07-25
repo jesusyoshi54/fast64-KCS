@@ -7,7 +7,7 @@ from bpy.utils import register_class, unregister_class
 
 from pathlib import Path
 
-from .kcs_gfx import import_geo_bin, export_geo_c
+from .kcs_gfx import import_geo_bin, import_geo_bin_anims, export_geo_c
 from .kcs_col import add_node, import_col_bin, export_col_c, set_camera_pathing, get_node_distance
 from .kcs_utils import parse_stage_table, make_empty, find_item_from_iterable
 
@@ -48,7 +48,7 @@ class KCS_Import_NLD_Gfx(Operator):
     def execute(self, context: bpy.types.Context):
         scene = context.scene.KCS_scene
         bank_id = scene.import_bank_id.bank_id()
-        file = Path(scene.decomp_path) / "assets" / "geo" / ("bank_%d" % bank_id[0]) / ("%d" % bank_id[1])
+        file = Path(scene.decomp_path) / "assets" / "geo" / (f"bank_{bank_id[0]}") / (f"{bank_id[1]}")
         if scene.file_format == "binary":
             name = file / "geo.bin"
             if not name.exists():
@@ -57,6 +57,39 @@ class KCS_Import_NLD_Gfx(Operator):
                 raise PluginError(f"Could not find file {name}, geo Bank/ID does not exist")
             import_geo_bin(
                 name, context, "KCS Gfx {}-{}".format(*bank_id), Path(scene.decomp_path) / "assets" / "image"
+            )
+        else:
+            raise PluginError("C importing is not supported yet")
+        return {"FINISHED"}
+
+
+# import all anims from gfx file onto target armature
+class KCS_Import_Anims(Operator):
+    bl_label = "Import Anims"
+    bl_idname = "kcs.import_anims"
+    bl_description = "Imports all the animations associated with a given geo block onto a target armature"
+
+    @classmethod
+    def poll(self, context: bpy.types.Context):
+        active_object = context.active_object
+        if not active_object or active_object.type != "ARMATURE":
+            return False
+        else:
+            return True
+
+    def execute(self, context: bpy.types.Context):
+        scene = context.scene.KCS_scene
+        bank_id = scene.import_bank_id.bank_id()
+        base_path = Path(scene.decomp_path) / "assets"
+        geo_file = base_path /  "geo" / (f"bank_{bank_id[0]}") / (f"{bank_id[1]}")
+        if scene.file_format == "binary":
+            name = geo_file / "geo.bin"
+            if not name.exists():
+                name = geo_file / "block.bin"
+            if not name.exists():
+                raise PluginError(f"Could not find file {name}, geo Bank/ID does not exist")
+            import_geo_bin_anims(
+                name, context, base_path, "{}-{}".format(*bank_id)
             )
         else:
             raise PluginError("C importing is not supported yet")
@@ -369,6 +402,7 @@ kcs_operators = (
     KCS_Add_Node,
     KCS_Animate_Nodes,
     KCS_Import_NLD_Gfx,
+    KCS_Import_Anims,
     KCS_Import_Col,
     KCS_Add_Tex,
     KCS_Add_Pal,

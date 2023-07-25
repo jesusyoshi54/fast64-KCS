@@ -272,20 +272,16 @@ class Mat:
 
     # rework with combinatoric render mode draft PR
     def set_render_mode(self, f3d: F3DMaterialProperty):
+        print(getattr(self, "RenderMode", None))
         rdp = f3d.rdp_settings
+        render_mode = f3d.rdp_settings.render_mode
         if self.TwoCycle:
             rdp.g_mdsft_cycletype = "G_CYC_2CYCLE"
         else:
             rdp.g_mdsft_cycletype = "G_CYC_1CYCLE"
         if hasattr(self, "RenderMode"):
-            rdp.set_rendermode = True
-            # if the enum isn't there, then just print an error for now
-            try:
-                rdp.rendermode_preset_cycle_1 = self.RenderMode[0]
-                rdp.rendermode_preset_cycle_2 = self.RenderMode[1]
-                # print(f"set render modes with render mode {self.RenderMode}")
-            except:
-                print(f"could not set render modes with render mode {self.RenderMode}")
+            render_mode.set_rendermode = True
+            render_mode.set_render_mode(self.RenderMode[0], self.RenderMode[1])
 
     def set_geo_mode(self, rdp: RDPSettings, mat: bpy.types.Material):
         # texture gen has a different name than gbi
@@ -481,7 +477,7 @@ class DL(DataParser):
     # The second is the material class
     def gsDPSetRenderMode(self, macro: Macro):
         self.NewMat = 1
-        self.LastMat.RenderMode = [a.strip() for a in macro.args]
+        self.LastMat.RenderMode = [a for a in macro.args]
         return self.continue_parse
 
     # The highest numbered light is always the ambient light
@@ -774,6 +770,9 @@ class DL(DataParser):
         return self.continue_parse
 
     # syncs need no processing
+    def gsSPModifyVertex(self, macro: Macro):
+        return self.continue_parse
+        
     def gsDPPipeSync(self, macro: Macro):
         return self.continue_parse
 

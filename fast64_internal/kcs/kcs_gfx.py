@@ -16,6 +16,7 @@ from re import findall
 from typing import BinaryIO, TextIO, Any
 
 from . import f3dex2
+from .kcs_anims import import_anim_bin
 from .kcs_utils import *
 from .kcs_data import (
     geo_block_includes,
@@ -31,6 +32,7 @@ from ..utility import (
     duplicateHierarchy,
     cleanupDuplicatedObjects,
     transform_mtx_blender_to_n64,
+    yUpToZUp,
     getFMeshName,
     parentObject,
     PluginError,
@@ -98,7 +100,7 @@ class Tex_Scroll(BinProcess, BinWrite):
                 if v[3]:
                     a.append(self.upt(start + k, v[0], v[2]))
             except:
-                a.append(self.upt(start + k, v[0], v[2])[0])
+                a.append(self.upt(start + k, v[0], v[2]))
         return a
 
     def __init__(self, scrollPtrs, file, ptr):
@@ -399,6 +401,8 @@ class GeoBinary(BinProcess):
         self.file = file
         self.main_header = self.upt(0, ">8L", 32)
         self.scale = scale
+    
+    def decode_geo_block(self):
         self.get_tex_scrolls()
         self.DLs = (
             dict()
@@ -710,15 +714,21 @@ class BpyGeo:
         # give it a non zero length
         location = cur_transform.to_translation() * (1/self.scale)
         edit_bone.head = location
-        edit_bone.tail = location + Vector((0, 0, -0.1))
+        edit_bone.tail = location + Vector((0, 0, 0.1))
+        # this is just visual to make the bones the same size, bones aren't actually bendy
+        edit_bone.bbone_x = 0.02
+        edit_bone.bbone_z = 0.02
         if parent_bone:
-            edit_bone.parent = self.rt.data.edit_bones.get(parent_bone)
+            parent = self.rt.data.edit_bones.get(parent_bone)
+            parent.tail = edit_bone.head
+            edit_bone.parent = parent
+            edit_bone.use_connect = True
         bpy.ops.object.mode_set(mode="OBJECT", toggle=False)
         self.rt.pose.bones[name].rotation_mode = "XYZ"
     
     def write_bpy_armature_from_geo(self, name: str, cls: GeoBinary, tex_path: Path, collection: bpy.types.Collection):
         # for now, do basic import, each layout is an object
-        transform_stack: list[str, Matrix] = [["", transform_mtx_blender_to_n64()]]
+        transform_stack: list[str, Matrix] = [["", yUpToZUp]]
         stack_index = 0 # everything will go on root
         last_mat = None
         # create dict of models so I can reuse model dat as needed (usually for blocks)
@@ -754,7 +764,6 @@ class BpyGeo:
             cur_transform = transform_stack[stack_index][1]
             
             # make the bone
-            print(transform_stack, stack_index)
             self.add_bone_with_transform(cur_transform, layout_name, transform_stack[stack_index - 1][0])
             
             if obj:
@@ -767,13 +776,14 @@ class BpyGeo:
         override = {**bpy.context.copy(), "selected_editable_objects": mesh_objs, "active_object": mesh_objs[0]}
         with bpy.context.temp_override(**override):
             bpy.ops.object.join()
+        parentObject(self.rt, mesh_objs[0], keep=1)
         # armature deform
         mod = mesh_objs[0].modifiers.new("deform", "ARMATURE")
         mod.object = self.rt
     
     def write_bpy_gfx_from_geo(self, name: str, cls: GeoBinary, tex_path: Path, collection: bpy.types.Collection):
         # for now, do basic import, each layout is an object
-        transform_stack: list[bpy.types.Object, Matrix] = [[self.rt, transform_mtx_blender_to_n64()]]
+        transform_stack: list[bpy.types.Object, Matrix] = [[self.rt, yUpToZUp]]
         stack_index = 0 # everything will go on root
         last_mat = None
         # create dict of models so I can reuse model dat as needed (usually for blocks)
@@ -806,11 +816,11 @@ class BpyGeo:
                 # set KCS props of obj
                 obj.KCS_mesh.mesh_type = "Graphics"
             
-            transform_stack = self.update_transform_stack(layout, transform_stack, stack_index, obj)
+            transform_stack, stack_index  = self.update_transform_stack(layout, transform_stack, stack_index, obj)
             cur_transform = transform_stack[stack_index][1]
             
             parentObject(transform_stack[stack_index - 1][0], obj, keep=1)
-            obj.matrix_world = transform_matrix_to_bpy(cur_transform) * (1/self.scale)
+            obj.matrix_world = cur_transform * (1/self.scale)
 
     # create the fModel cls and populate it with layouts based on child objects
     def init_fModel_from_bpy(self):
@@ -1119,26 +1129,43 @@ def export_geo_c(name: str, obj: bpy.types.Object, context: bpy.types.Context):
 #    Importer
 # ------------------------------------------------------------------------
 
+def import_geo_bin_anims(bin_file: Path, context: bpy.types.Context, base_path: Path, name: str):
+    with open(bin_file, "rb") as geo_bin:
+        geo_block = GeoBinary(geo_bin.read(), context.scene.KCS_scene.scale)
+        geo_block.get_anims()
+    max_frame = 0
+    for anim in geo_block.anims:
+        anim_path = base_path / "anim" / f"bank_{anim[0]}" / f"{anim[1]}" / "anim.bin"
+        last_frame = import_anim_bin(context, anim_path, f"KCS gfx: {name} anim: {anim[1]}")
+        if last_frame > max_frame:
+            max_frame = last_frame
+    # set the scene end frames
+    context.scene.frame_end = max_frame
 
 @time_func
-def import_geo_bin(bin_file: BinaryIO, context: bpy.types.Context, name: str, path: Path):
-    Geo = bin_file
-    Geo = open(Geo, "rb")
+def import_geo_bin(bin_file: Path, context: bpy.types.Context, name: str, path: Path):
+    # decode geo block
+    with open(bin_file, "rb") as geo_bin:
+        geo_block = GeoBinary(geo_bin.read(), context.scene.KCS_scene.scale)
+        geo_block.decode_geo_block()
+    
+    # setup the root object and root collection
     if context.scene.KCS_scene.use_collections:
         gfx_collection = bpy.data.collections.new(name)
         context.scene.collection.children.link(gfx_collection)
     else:
         gfx_collection = context.scene.collection
     if context.scene.KCS_scene.import_armature:
-        rt = bpy.data.objects.new(name, bpy.data.armatures.new(name))
-        # rt.KCS_obj.KCS_obj_type = "Graphics"
-        gfx_collection.objects.link(rt)
+        root = bpy.data.objects.new(name, bpy.data.armatures.new(name))
+        gfx_collection.objects.link(root)
+        root.data.display_type = "BBONE"
     else:
-        rt = make_empty(name, "PLAIN_AXES", gfx_collection)
-        rt.KCS_obj.KCS_obj_type = "Graphics"
-    Geo_Block = GeoBinary(Geo.read(), context.scene.KCS_scene.scale)
-    write = BpyGeo(rt, context.scene.KCS_scene.scale)
+        root = make_empty(name, "PLAIN_AXES", gfx_collection)
+        root.KCS_obj.KCS_obj_type = "Graphics"
+    
+    # write the data out to blender
+    write = BpyGeo(root, context.scene.KCS_scene.scale)
     if context.scene.KCS_scene.import_armature:
-        write.write_bpy_armature_from_geo("geo", Geo_Block, path, gfx_collection)
+        write.write_bpy_armature_from_geo("geo", geo_block, path, gfx_collection)
     else:
-        write.write_bpy_gfx_from_geo("geo", Geo_Block, path, gfx_collection)
+        write.write_bpy_gfx_from_geo("geo", geo_block, path, gfx_collection)

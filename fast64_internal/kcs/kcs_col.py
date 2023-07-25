@@ -67,7 +67,7 @@ class LevelBinary(MiscBinary):
         if start:
             while True:
                 sig = self.upt(start + x * 0x2C, ">L", 4)
-                if sig[0] == 0x99999999:
+                if sig == 0x99999999:
                     break
                 ent = self.upt(start + x * 0x2C, ">6BH9f", 0x2C)
                 pos, rot, scale = [vec3f._make(ent[3 * i + 7 : 3 * i + 10]) for i in range(3)]
@@ -104,7 +104,7 @@ class LevelBinary(MiscBinary):
         while x + de_groups + 2 < de_indices:
             grp = self.upt(x + de_groups, ">3H", 6)
             if grp[0] != 0:
-                indices = [self.upt(2 * grp[1] + de_indices + 2 * i, ">H", 2)[0] - 1 for i in range(grp[0])]
+                indices = [self.upt(2 * grp[1] + de_indices + 2 * i, ">H", 2) - 1 for i in range(grp[0])]
                 self.de_tris[grp[2]] = [self.triangles[a] for a in indices]
                 pops.extend(indices)
             x += 6
@@ -1329,9 +1329,12 @@ def export_col_c(name: str, obj: bpy.types.Object, context: bpy.types.Context):
 # ------------------------------------------------------------------------
 
 
-def import_col_bin(bin_file: BinaryIO, context: bpy.types.Context, name: str):
-    LS = bin_file
-    LS = open(LS, "rb")
+def import_col_bin(bin_file: Path, context: bpy.types.Context, name: str):
+    # decode the binary
+    with open(bin_file, "rb") as level_settings_bin:
+        LS_Block = MiscBinary(level_settings_bin.read())
+    
+    # setup the root object and collection
     if context.scene.KCS_scene.use_collections:
         collision_collection = bpy.data.collections.new(name)
         context.scene.collection.children.link(collision_collection)
@@ -1339,7 +1342,8 @@ def import_col_bin(bin_file: BinaryIO, context: bpy.types.Context, name: str):
         collision_collection = context.scene.collection
     rt = make_empty(name, "PLAIN_AXES", collision_collection)
     rt.KCS_obj.KCS_obj_type = "Collision"
-    LS_Block = MiscBinary(LS.read())
+    
+    # write out the binary data to blender
     write = BpyCollision(rt, collision_collection)
     write.write_bpy_col(LS_Block, context.scene, context.scene.KCS_scene.scale)
 

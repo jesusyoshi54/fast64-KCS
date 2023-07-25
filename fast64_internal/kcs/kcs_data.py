@@ -8,6 +8,52 @@ HS = 0x80057DB0
 # values are (data type, then name, is arr (only as needed))
 
 # -------------------------------------------------------------------------------
+# Anim Structs/data
+# -------------------------------------------------------------------------------
+
+
+anim_data_includes = """
+#include <ultra64.h>
+#include "anim_types.h"
+#include "anim.h"
+"""
+
+
+anim_header = {
+    0x00: ("struct AnimBone", "bone_ptr", "ptr"),
+    0x04: ("u32", "anim_mode"),
+    0x08: ("u32", "num_virtual_converts"),
+}
+
+anim_cmd_enums = {
+    0: "Stop",
+    1: "Unk1",
+    2: "Block",
+    3: "Lerp_B",
+    4: "Lerp_NB",
+    5: "Lerp_Step_B",
+    6: "Lerp_Step_NB",
+    7: "Lerp_Multiplier",
+    8: "Lerp_Zero_B",
+    9: "Lerp_Zero_NB",
+    10: "Set_B",
+    11: "Set_NB",
+    12: "UnkC",
+    13: "UnkD",
+    14: "Loop",
+    15: "Toggle_Bone",
+    16: "Unk10",
+    17: "Unk11",
+    18: "Set_Color_B",
+    19: "Set_Color_NB",
+    20: "Lerp_Color_B",
+    21: "Set_Int_Field_NB",
+    22: "Unk16",
+    23: "Unk17",
+}
+
+
+# -------------------------------------------------------------------------------
 # Geometry Block Structs/Data
 # -------------------------------------------------------------------------------
 

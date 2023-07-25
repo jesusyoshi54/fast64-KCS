@@ -85,6 +85,7 @@ class KCS_IO_PT_Panel(Panel):
         KCS_scene.import_bank_id.draw(layout)
         layout.prop(KCS_scene, "import_armature")
         layout.operator("kcs.import_nld_gfx")
+        layout.operator("kcs.import_anims")
         layout.operator("kcs.import_col")
 
 

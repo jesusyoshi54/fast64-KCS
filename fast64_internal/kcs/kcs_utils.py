@@ -129,8 +129,14 @@ class StructContainer:
 
 # just a base class that holds some binary processing
 class BinProcess:
-    def upt(self, offset: int, type_string: str, length: int):
-        return struct.unpack(type_string, self.file[offset : offset + length])
+    def upt(self, offset: int, type_string: str, length: int, iter: bool = False):
+        a = struct.unpack(type_string, self.file[offset : offset + length])
+        if iter:
+            return a
+        if len(a) == 1:
+            return a[0]
+        else:
+            return a
 
     def unpack_struct(self, start: int, struct_dict: dict):
         buffer = []
@@ -162,11 +168,11 @@ class BinProcess:
         x = 0
         start = self.seg2phys(start)
         ref = []
-        r = self.upt(start, ">L", 4)[0]
+        r = self.upt(start, ">L", 4)
         while r != stop:
             x += 4
             ref.append(r)
-            r = self.upt(start + x, ">L", 4)[0]
+            r = self.upt(start + x, ">L", 4)
         ref.append(r)
         return ref
 
