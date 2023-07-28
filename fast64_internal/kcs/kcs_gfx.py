@@ -720,9 +720,12 @@ class BpyGeo:
         edit_bone.bbone_z = 0.02
         if parent_bone:
             parent = self.rt.data.edit_bones.get(parent_bone)
-            parent.tail = edit_bone.head
             edit_bone.parent = parent
-            edit_bone.use_connect = True
+            # if the bone has zero length it will delete itself, so
+            # don't connect that and keep the old tail location
+            if parent.head != edit_bone.head:
+                parent.tail = edit_bone.head
+                edit_bone.use_connect = True
         bpy.ops.object.mode_set(mode="OBJECT", toggle=False)
         self.rt.pose.bones[name].rotation_mode = "XYZ"
     
