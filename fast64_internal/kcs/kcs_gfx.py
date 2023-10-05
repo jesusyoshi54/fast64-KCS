@@ -197,16 +197,15 @@ class KCS_F3d(DL):
             self.LastMat.tex_scale = (scr.scroll.xScale, scr.scroll.yScale)
 
     # recursively parse the display list in order to return a bunch of model data
-    def get_data_from_dl(self, Geo, layout):
-        self.VertBuff = [0] * 32
-        self.Tris = []
-        self.UVs = []
-        self.VCs = []
-        self.Verts = []
-        self.Mats = []
+    def get_data_from_dl(self, Geo, layout, last_mat = None):
+        self.new_mesh_setup()
         self.NewMat = 0
         self.cur_geo = Geo
         self.last_layout = layout
+        if not last_mat:
+            self.LastMat = Mat()
+        else:
+            self.LastMat = last_mat
         if hasattr(layout, "DLs"):
             for entry_ptr in layout.entry:
                 self.parse_stream(layout.DLs[entry_ptr], entry_ptr)
@@ -243,8 +242,8 @@ class KCS_F3d(DL):
         
     def gsSPVertex(self, macro: Macro):
         args = [int(a) for a in macro.args]
-        for i in range(args[2], args[2] + args[1], 1):
-            self.VertBuff[i] = len(self.Verts) + i - args[2]
+        for index, vert_buf_pos in enumerate(range(args[2], args[2] + args[1], 1)):
+            self.VertBuff[vert_buf_pos] = len(self.Verts) + index
         # verts are pre processed
         self.Verts.extend(self.cur_geo.vertices.Pos[args[0] : args[0] + args[1]])
         self.UVs.extend(self.cur_geo.vertices.UVs[args[0] : args[0] + args[1]])
@@ -268,57 +267,12 @@ class KCS_F3d(DL):
             return num
 
     def apply_f3d_mesh_dat(self, obj: bpy.types.Object, mesh: bpy.types.Mesh, tex_path: Path):
-        tris = mesh.polygons
-        bpy.context.view_layer.objects.active = obj
-        ind = -1
-        new = -1
-        UVmap = obj.data.uv_layers.new(name="UVMap")
-        # I can get the available enums for color attrs with this func
-        vcol_enums = propertyGroupGetEnums(bpy.types.FloatColorAttribute, "data_type")
-        # enums were changed in a blender version, this should future proof it a little
-        if "FLOAT_COLOR" in vcol_enums:
-            e = "FLOAT_COLOR"
-        else:
-            e = "COLOR"
-        Vcol = obj.data.color_attributes.get("Col")
-        if not Vcol:
-            Vcol = obj.data.color_attributes.new(name="Col", type=e, domain="CORNER")
-        Valph = obj.data.color_attributes.get("Alpha")
-        if not Valph:
-            Valph = obj.data.color_attributes.new(name="Alpha", type=e, domain="CORNER")
-        self.Mats.append([len(tris), 0])
-        for i, t in enumerate(tris):
-            if i > self.Mats[ind + 1][0]:
-                new = self.create_new_f3d_mat(self.Mats[ind + 1][1], mesh)
-                ind += 1
-                if not new:
-                    new = len(mesh.materials) - 1
-                    mat = mesh.materials[new]
-                    mat.name = "KCS F3D Mat {} {}".format(obj.name, new)
-                    self.Mats[new][1].apply_material_settings(mat, tex_path)
-                else:
-                    # I tried to re use mat slots but it is much slower, and not as accurate
-                    # idk if I was just doing it wrong or the search is that much slower, but this is easier
-                    mesh.materials.append(new)
-                    new = len(mesh.materials) - 1
-            # if somehow ther is no material assigned to the triangle or something is lost
-            if new != -1:
-                t.material_index = new
-                # Get texture size or assume 32, 32 otherwise
-                i = mesh.materials[new].f3d_mat.tex0.tex
-                if not i:
-                    WH = (32, 32)
-                else:
-                    WH = i.size
-                # Set UV data and Vertex Color Data
-                for v, l in zip(t.vertices, t.loop_indices):
-                    uv = self.UVs[v]
-                    vcol = self.VCs[v]
-                    # scale verts. I just copy/pasted this from kirby tbh Idk
-                    UVmap.data[l].uv = [a * (1 / (32 * b)) if b > 0 else a * 0.001 * 32 for a, b in zip(uv, WH)]
-                    # idk why this is necessary. N64 thing or something?
-                    UVmap.data[l].uv[1] = UVmap.data[l].uv[1] * -1 + 1
-                    Vcol.data[l].color = [a / 255 for a in vcol]
+        self.apply_materials_to_mesh(obj, mesh)
+        for index, (f3d_mat, bpy_mat) in enumerate(self.Mats.values()):
+            if not bpy_mat:
+                continue
+            f3d_mat.apply_material_settings(bpy_mat, tex_path)
+            bpy_mat.name = f"KCS f3d mat {obj.name} {index}"
 
     def create_new_f3d_mat(self, mat: SM64_Material, mesh: bpy.types.Mesh):
         # check if this mat was used already in another mesh (or this mat if DL is garbage or something)
@@ -737,6 +691,7 @@ class BpyGeo:
         # create dict of models so I can reuse model dat as needed (usually for blocks)
         parsed_models = dict()
         mesh_objs = []
+        kcs_f3d = KCS_F3d()
         for i, layout in enumerate(cls.layouts):
             if (layout.depth & 0xFF) == 0x12:
                 break
@@ -748,9 +703,8 @@ class BpyGeo:
                 if prev:
                     mesh, last_mat = prev
                 else:
-                    model_data = KCS_F3d(last_mat=last_mat)
-                    (layout.vertices, layout.Triangles) = model_data.get_data_from_dl(cls, layout)
-                    last_mat = model_data.LastMat
+                    (layout.vertices, layout.Triangles) = kcs_f3d.get_data_from_dl(cls, layout, last_mat=last_mat)
+                    last_mat = kcs_f3d.LastMat
                     mesh = bpy.data.meshes.new(layout_name)
                     mesh.from_pydata(layout.vertices, [], layout.Triangles)
                     # add model to dict
@@ -759,7 +713,7 @@ class BpyGeo:
                 collection.objects.link(obj)
                 # set KCS props of obj
                 obj.KCS_mesh.mesh_type = "Graphics"
-                self.apply_mesh_dat_to_obj(model_data, obj, mesh, tex_path, cleanup = bpy.context.scene.KCS_scene.clean_up)
+                self.apply_mesh_dat_to_obj(kcs_f3d, obj, mesh, tex_path, cleanup = bpy.context.scene.KCS_scene.clean_up)
             else:
                 obj = None
             
@@ -791,6 +745,7 @@ class BpyGeo:
         last_mat = None
         # create dict of models so I can reuse model dat as needed (usually for blocks)
         parsed_models = dict()
+        kcs_f3d = KCS_F3d()
         for i, layout in enumerate(cls.layouts):
             if (layout.depth & 0xFF) == 0x12:
                 break
@@ -801,9 +756,8 @@ class BpyGeo:
                 if prev:
                     mesh, last_mat = prev
                 else:
-                    model_data = KCS_F3d(last_mat=last_mat)
-                    (layout.vertices, layout.Triangles) = model_data.get_data_from_dl(cls, layout)
-                    last_mat = model_data.LastMat
+                    (layout.vertices, layout.Triangles) = kcs_f3d.get_data_from_dl(cls, layout, last_mat=last_mat)
+                    last_mat = kcs_f3d.LastMat
                     mesh = bpy.data.meshes.new(f"{name} {layout.depth&0xFF} {i}")
                     mesh.from_pydata(layout.vertices, [], layout.Triangles)
                     # add model to dict
@@ -812,7 +766,7 @@ class BpyGeo:
                 collection.objects.link(obj)
                 # set KCS props of obj
                 obj.KCS_mesh.mesh_type = "Graphics"
-                self.apply_mesh_dat_to_obj(model_data, obj, mesh, tex_path, cleanup = bpy.context.scene.KCS_scene.clean_up)
+                self.apply_mesh_dat_to_obj(kcs_f3d, obj, mesh, tex_path, cleanup = bpy.context.scene.KCS_scene.clean_up)
             # empty transform
             else:
                 obj = make_empty(f"{name} {layout.depth} {i}", "PLAIN_AXES", collection)

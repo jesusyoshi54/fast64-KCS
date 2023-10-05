@@ -1915,7 +1915,7 @@ def G_SETCOMBINE_Decode(bin):
     Noise = {7: "NOISE"}
     Key = {6: "CENTER", 7: "K4"}
     BasicA = {1: "TEXEL0", 2: "TEXEL1", 3: "PRIMITIVE", 4: "SHADE", 5: "ENVIRONMENT"}
-    LoD = {0: "LOD_FRACTION"}
+    LoD = {0: "LOD_FRACTION", 6: "PRIM_LOD_FRAC"}
     # a color = basic+one+combined+7as noise
     # b color = basic+combined+6 as key center+7 as key4
     # c color = basic+combined+C
@@ -1923,7 +1923,7 @@ def G_SETCOMBINE_Decode(bin):
 
     # a alpha = basicA+one+combined
     # b alpha = a alpha
-    # c alpha = basic+one+0 as LoD fraction
+    # c alpha = basic+Prim/LoD fraction
     # d alpha = a alpha
     # zero will be default, aka out of range
     ACmode = {**Basic, **Noise, **Combined, **One}
@@ -1933,7 +1933,7 @@ def G_SETCOMBINE_Decode(bin):
 
     AAmode = {**BasicA, **Combined, **One}
     BAmode = {**BasicA, **One, **Combined}
-    CAmode = {**BasicA, **LoD, **One}
+    CAmode = {**BasicA, **LoD}
     DAmode = {**BasicA, **One, **Combined}
 
     Acolor = (a, e)

@@ -17,7 +17,7 @@ from collections.abc import Sequence
 
 from ..f3d.f3d_material import F3DMaterialProperty, RDPSettings, TextureProperty
 
-from ..utility import hexOrDecInt
+from ..utility import hexOrDecInt, get_enums_from_prop
 from ..utility_importer import *
 
 # ------------------------------------------------------------------------
@@ -379,13 +379,91 @@ class DL(DataParser):
         self.Ambient_t = {}
         self.Lights1 = {}
         self.Textures = {}
+        self.VertBuff = [None] * 32 # if None vert is unloaded
         self.NewMat = 1
         if not lastmat:
             self.LastMat = Mat()
-            self.LastMat.name = 0
         else:
             self.LastMat = lastmat
         super().__init__()
+
+    def new_mesh_setup(self):
+        # carry over verts from previous model
+        carried_vert = []
+        carried_uv = []
+        carried_vcs = []
+        for buffer_vert in self.VertBuff:
+            if buffer_vert is not None:
+                carried_vert.append(self.Verts[buffer_vert])
+                carried_uv.append(self.UVs[buffer_vert])
+                carried_vcs.append(self.VCs[buffer_vert])
+        self.Verts = carried_vert
+        self.UVs = carried_uv
+        self.VCs = carried_vcs
+        # re-number verts in buf to match new location in vert list
+        for index, _ in enumerate(self.Verts):
+            self.VertBuff[index] = index
+        # clear triangles
+        self.Tris = []
+        # inherit the last used material
+        self.Mats = {-1: [self.LastMat, None]}
+
+    # you will need to apply material settings after this
+    def apply_materials_to_mesh(self, obj: bpy.types.Object, mesh: bpy.types.Mesh):
+        uv_map, vertex_color, vertex_alpha = self.setup_mesh_attrs(obj)
+        new_index = -1 
+        for index, tri in enumerate(mesh.polygons):
+            next_mat = self.Mats.get(index, None)
+            if next_mat is not None or len(mesh.materials) == 0:
+                if len(mesh.materials) == 0:
+                    next_mat = self.Mats[-1]
+                new_mat = self.create_new_f3d_mat(next_mat[0], mesh)
+                if not new_mat:
+                    new_index = len(mesh.materials) - 1
+                    new_mat = mesh.materials[new_index]
+                    next_mat[1] = new_mat
+                else:
+                    mesh.materials.append(new_mat)
+                    new_index = len(mesh.materials) - 1
+            self.format_new_tri(new_index, mesh, tri, uv_map, vertex_color, vertex_alpha)
+
+    # creates UV map and vertex color attributes for a new mesh
+    def setup_mesh_attrs(self, obj):
+        bpy.context.view_layer.objects.active = obj
+        uv_map = obj.data.uv_layers.new(name="UVMap")
+        # I can get the available enums for color attrs with this func
+        vcol_enums = get_enums_from_prop(bpy.types.FloatColorAttribute, "data_type")
+        # enums were changed in a blender version, this should future proof it a little
+        if "FLOAT_COLOR" in vcol_enums:
+            enum = "FLOAT_COLOR"
+        else:
+            enum = "COLOR"
+        vertex_color = obj.data.color_attributes.get("Col")
+        if not vertex_color:
+            vertex_color = obj.data.color_attributes.new(name="Col", type=enum, domain="CORNER")
+        vertex_alpha = obj.data.color_attributes.get("Alpha")
+        if not vertex_alpha:
+            vertex_alpha = obj.data.color_attributes.new(name="Alpha", type=enum, domain="CORNER")
+        return uv_map, vertex_color, vertex_alpha
+    
+    # applies uv and vcol data as well as material index
+    def format_new_tri(self, new_index: int, mesh: bpy.types.Mesh, tri: bpy.types.MeshPolygon, uv_map: bpy.types.MeshUVLoopLayer, vertex_color: bpy.types.FloatColorAttribute, vertex_alpha: bpy.types.FloatColorAttribute):
+        tri.material_index = new_index
+        # Get texture size or assume 32, 32 otherwise
+        image = mesh.materials[new_index].f3d_mat.tex0.tex
+        if not image:
+            WH = (32, 32)
+        else:
+            WH = image.size
+        # Set UV data and Vertex Color Data
+        for vert, loop in zip(tri.vertices, tri.loop_indices):
+            uv = self.UVs[vert]
+            vcol = self.VCs[vert]
+            # N64 uses s10.5 absolute while bpy is relative floating pt
+            uv_map.data[loop].uv = [a * (1 / (32 * b)) if b > 0 else a * 0.001 * 32 for a, b in zip(uv, WH)]
+            # N64 has funny coords
+            uv_map.data[loop].uv[1] = uv_map.data[loop].uv[1] * -1 + 1
+            vertex_color.data[loop].color = [a / 255 for a in vcol]
 
     def gsSPEndDisplayList(self, macro: Macro):
         return self.break_parse
@@ -395,7 +473,7 @@ class DL(DataParser):
         if not NewDL:
             raise Exception(
                 "Could not find DL {} in levels/{}/{}leveldata.inc.c".format(
-                    NewDL, self.scene.LevelImp.Level, self.scene.LevelImp.Prefix
+                    NewDL, self.scene.level_import.Level, self.scene.level_import.Prefix
                 )
             )
         self.reset_parser(branched_dl)
@@ -419,7 +497,7 @@ class DL(DataParser):
         if not NewDL:
             raise Exception(
                 "Could not find DL {} in levels/{}/{}leveldata.inc.c".format(
-                    NewDL, self.scene.LevelImp.Level, self.scene.LevelImp.Prefix
+                    NewDL, self.scene.level_import.Level, self.scene.level_import.Prefix
                 )
             )
         self.reset_parser(branched_dl)
@@ -434,28 +512,46 @@ class DL(DataParser):
         else:
             ref = macro.args[0]
             offset = 0
-        VB = self.Vtx.get(ref)
+        VB = self.Vtx.get(ref.strip())
         if not VB:
             raise Exception(
                 "Could not find VB {} in levels/{}/{}leveldata.inc.c".format(
-                    ref, self.scene.LevelImp.Level, self.scene.LevelImp.Prefix
+                    ref, self.scene.level_import.Level, self.scene.level_import.Prefix
                 )
             )
         vertex_load_start = hexOrDecInt(macro.args[2])
         vertex_load_length = hexOrDecInt(macro.args[1])
-        Verts = VB[
+        loaded_verts = VB[
             offset : offset + vertex_load_length
         ]  # If you use array indexing here then you deserve to have this not work
-        Verts = [self.parse_vert(v) for v in Verts]
-        for k, i in enumerate(range(vertex_load_start, vertex_load_length, 1)):
-            self.VertBuff[i] = [Verts[k], vertex_load_start]
+        loaded_verts: tuple("pos", "uvs", "norm") = [self.parse_vert(v) for v in loaded_verts]
+        for index, vert_buf_pos in enumerate(range(vertex_load_start, vertex_load_length)):
+            self.VertBuff[vert_buf_pos] = len(self.Verts) + index
         # These are all independent data blocks in blender
-        self.Verts.extend([v[0] for v in Verts])
-        self.UVs.extend([v[1] for v in Verts])
-        self.VCs.extend([v[2] for v in Verts])
-        self.LastLoad = vertex_load_length
+        self.Verts.extend([v[0] for v in loaded_verts])
+        self.UVs.extend([v[1] for v in loaded_verts])
+        self.VCs.extend([v[2] for v in loaded_verts])
         return self.continue_parse
 
+    def gsSPModifyVertex(self, macro: Macro):
+        vtx = self.VertBuff[hexOrDecInt(macro.args[0])]
+        where = self.eval_modify_vtx(macro.args[1])
+        val = hexOrDecInt(macro.args[2])
+        # if it is None, something weird, or screenspace I won't edit it
+        if where == "ST":
+            uv = (val >> 16)& 0xFFFF, val & 0xFFFF
+            self.Verts.append(self.Verts[vtx])
+            self.UVs.append(uv)
+            self.VCs.append(self.VCs[vtx])
+            self.VertBuff[hexOrDecInt(macro.args[0])] = len(self.Verts)
+        elif where == "RGBA":
+            vertex_col = [(val >> 8*i)&0xFF for i in range(4)].reverse()
+            self.Verts.append(self.Verts[vtx])
+            self.UVs.append(self.UVs[vtx])
+            self.VCs.append(vertex_col)
+            self.VertBuff[hexOrDecInt(macro.args[0])] = len(self.Verts)
+        return self.continue_parse
+    
     def gsSP2Triangles(self, macro: Macro):
         self.make_new_material()
         args = [hexOrDecInt(a) for a in macro.args]
@@ -770,7 +866,7 @@ class DL(DataParser):
         return self.continue_parse
 
     # syncs need no processing
-    def gsSPModifyVertex(self, macro: Macro):
+    def gsSPCullDisplayList(self, macro: Macro):
         return self.continue_parse
         
     def gsDPPipeSync(self, macro: Macro):
@@ -797,18 +893,39 @@ class DL(DataParser):
     def make_new_material(self):
         if self.NewMat:
             self.NewMat = 0
-            self.Mats.append([len(self.Tris) - 1, self.LastMat])
+            self.Mats[len(self.Tris)] = [self.LastMat, None]
             self.LastMat = deepcopy(self.LastMat)  # for safety
    
     def parse_tri(self, Tri: Sequence[int]):
         return [self.VertBuff[a] for a in Tri]
-
+        
+    def parse_vert(self, Vert: str):
+        v = Vert.replace("{", "").replace("}", "").split(",")
+        def num(value):
+            return [eval(a) for a in value]
+        pos = num(v[:3])
+        uv = num(v[4:6])
+        vc = num(v[6:10])
+        return [pos, uv, vc]
+        
     def eval_image_frac(self, arg: Union[str, Number]):
         if type(arg) == int:
             return arg
         arg2 = arg.replace("G_TEXTURE_IMAGE_FRAC", "2")
         return eval(arg2)
 
+    def eval_modify_vtx(self, arg: Union[str, Number]):
+        mem_locations = {
+            0x10: "G_MWO_POINT_RGBA",
+            0x14: "G_MWO_POINT_ST",
+            0x18: "G_MWO_POINT_XYSCREEN",
+            0x1C: "G_MWO_POINT_ZSCREEN",
+        }
+        mod_loc = mem_locations.get(arg)
+        if mod_loc == None:
+            mod_loc = arg
+        return mod_loc.removeprefix("G_MWO_POINT_")
+        
     def eval_tile_enum(self, arg: Union[str, Number]):
         # only 0 and 7 have enums, other stuff just uses int (afaik)
         Tiles = {
