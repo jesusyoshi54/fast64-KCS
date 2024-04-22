@@ -262,14 +262,13 @@ enumPuppycamFlags = [
 
 
 class SM64_Object:
-    def __init__(self, model, position, rotation, behaviour, bparam, acts, name):
+    def __init__(self, model, position, rotation, behaviour, bparam, acts):
         self.model = model
         self.behaviour = behaviour
         self.bparam = bparam
         self.acts = acts
         self.position = position
         self.rotation = rotation
-        self.name = name  # to sort by when exporting
 
     def to_c(self):
         if self.acts == 0x1F:
@@ -326,7 +325,6 @@ class SM64_Whirpool:
         self.condition = condition
         self.strength = strength
         self.position = position
-        self.name = "whirlpool"  # for sorting
 
     def to_c(self):
         return (
@@ -455,7 +453,6 @@ class SM64_Mario_Start:
         self.area = area
         self.position = position
         self.rotation = rotation
-        self.name = "Mario"  # for sorting
 
     def to_c(self):
         return (
@@ -484,6 +481,8 @@ class SM64_Area:
         self.collision = collision
         self.index = index
         self.objects = []
+        self.whirlpools = []
+        self.mario_starts = []
         self.macros = []
         self.specials = []
         self.water_boxes = []
@@ -503,9 +502,13 @@ class SM64_Area:
         data += "\tAREA(" + str(self.index) + ", " + self.geolayout.name + "),\n"
         for warpNode in self.warpNodes:
             data += "\t\t" + warpNode + ",\n"
-        # export objects in name order
-        for obj in sorted(self.objects, key=(lambda obj: obj.name)):
+        for mario_start in self.mario_starts:
+            data += "\t\t" + mario_start.to_c() + ",\n"
+        # export objects in model, behavior
+        for obj in sorted(self.objects, key=(lambda obj: (obj.model, obj.behaviour))):
             data += "\t\t" + obj.to_c() + ",\n"
+        for whirlpool in self.whirlpools:
+            data += "\t\t" + whirlpool.to_c() + ",\n"
         data += "\t\tTERRAIN(" + self.collision.name + "),\n"
         if includeRooms:
             data += "\t\tROOMS(" + self.collision.rooms_name() + "),\n"
@@ -525,7 +528,7 @@ class SM64_Area:
         data = CData()
         data.header = "extern const MacroObject " + self.macros_name() + "[];\n"
         data.source += "const MacroObject " + self.macros_name() + "[] = {\n"
-        for macro in self.macros:
+        for macro in sorted(self.macros, key=(lambda macro: (macro.preset))):
             data.source += "\t" + macro.to_c() + ",\n"
         data.source += "\tMACRO_OBJECT_END(),\n};\n\n"
 
@@ -844,7 +847,6 @@ def process_sm64_objects(obj, area, rootMatrix, transformMatrix, specialsOnly):
                         behaviour,
                         obj.fast64.sm64.game_object.get_behavior_params(),
                         get_act_string(obj),
-                        obj.name,
                     )
                 )
             elif obj.sm64_obj_type == "Macro":
@@ -859,12 +861,12 @@ def process_sm64_objects(obj, area, rootMatrix, transformMatrix, specialsOnly):
                 )
             elif obj.sm64_obj_type == "Mario Start":
                 mario_start = SM64_Mario_Start(obj.sm64_obj_mario_start_area, translation, rotation.to_euler())
-                area.objects.append(mario_start)
+                area.mario_starts.append(mario_start)
                 area.mario_start = mario_start
             elif obj.sm64_obj_type == "Trajectory":
                 pass
             elif obj.sm64_obj_type == "Whirpool":
-                area.objects.append(
+                area.whirlpools.append(
                     SM64_Whirpool(obj.whirlpool_index, obj.whirpool_condition, obj.whirpool_strength, translation)
                 )
             elif obj.sm64_obj_type == "Camera Volume":
