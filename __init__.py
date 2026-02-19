@@ -30,6 +30,9 @@ from .fast64_internal.utility_anim import utility_anim_register, utility_anim_un
 from .fast64_internal.mk64 import MK64_Properties, mk64_register, mk64_unregister
 from .fast64_internal.mk64.mk64_constants import mk64_world_defaults
 
+from .fast64_internal.bk64 import BK64_Properties, bk64_register, bk64_unregister
+from .fast64_internal.bk64.bk64_level_importer import BK64_ObjectProperties
+
 from .fast64_internal.f3d.f3d_material import (
     F3D_MAT_CUR_VERSION,
     mat_register,
@@ -82,6 +85,7 @@ gameEditorEnum = (
     ("OOT", "OOT", "Ocarina Of Time", 1),
     # ("MM", "MM", "Majora's Mask", 4),
     ("MK64", "MK64", "Mario Kart 64", 3),
+    ("BK64", "BK64", "Banjo Kazooie", 4),
     ("Homebrew", "Homebrew", "Homebrew", 2),
 )
 
@@ -253,6 +257,7 @@ class Fast64_Properties(bpy.types.PropertyGroup):
     sm64: bpy.props.PointerProperty(type=SM64_Properties, name="SM64 Properties")
     oot: bpy.props.PointerProperty(type=OOT_Properties, name="OOT Properties")
     mk64: bpy.props.PointerProperty(type=MK64_Properties, name="MK64 Properties")
+    bk64: bpy.props.PointerProperty(type=BK64_Properties, name="BK64 Properties")
     settings: bpy.props.PointerProperty(type=Fast64Settings_Properties, name="Fast64 Settings")
     renderSettings: bpy.props.PointerProperty(type=Fast64RenderSettings_Properties, name="Fast64 Render Settings")
 
@@ -282,6 +287,7 @@ class Fast64_ObjectProperties(bpy.types.PropertyGroup):
 
     sm64: bpy.props.PointerProperty(type=SM64_ObjectProperties, name="SM64 Object Properties")
     oot: bpy.props.PointerProperty(type=OOT_ObjectProperties, name="Z64 Object Properties")  # TODO: rename oot to z64
+    bk64: bpy.props.PointerProperty(type=BK64_ObjectProperties, name="BK64 Object Properties")
 
 
 class UpgradeF3DMaterialsDialog(bpy.types.Operator):
@@ -403,7 +409,7 @@ def set_game_defaults(scene: bpy.types.Scene, set_ucode=True):
     if scene.gameEditorMode == "SM64":
         f3d_type = "F3D"
         world_defaults = sm64_world_defaults
-    elif scene.gameEditorMode == "MK64":
+    elif scene.gameEditorMode in {"MK64", "BK64"}:
         f3d_type = "F3DEX"
         world_defaults = mk64_world_defaults
     elif scene.gameEditorMode in {"OOT", "MM"}:
@@ -454,6 +460,7 @@ def register():
     sm64_register(True)
     oot_register(True)
     mk64_register(True)
+    bk64_register(True)
 
     gltf_extension_register()
 
@@ -503,6 +510,7 @@ def unregister():
     sm64_unregister(True)
     oot_unregister(True)
     mk64_unregister(True)
+    bk64_unregister(True)
     mat_unregister()
     gltf_extension_unregister()
     bsdf_conv_unregister()

@@ -45,16 +45,12 @@ import cProfile, pstats, io
 from pstats import SortKey
 
 import os, sys, math, re, typing
-from array import array
 from struct import *
-from shutil import copy
 from pathlib import Path
-from types import ModuleType
 from mathutils import Vector, Euler, Matrix, Quaternion
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TextIO
-from numbers import Number
+from typing import TextIO, BinaryIO
 from collections.abc import Sequence
 
 from ..f3d.f3d_import import *
@@ -3134,6 +3130,7 @@ def get_sm64_geos():
             for model in actor.models.keys():
                 enum_list.append((model, model, name))
     return enum_list
+
 
 class SM64_ImportProperties(PropertyGroup):
     # actor props

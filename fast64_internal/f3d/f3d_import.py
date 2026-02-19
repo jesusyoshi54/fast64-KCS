@@ -590,8 +590,8 @@ class DL(DataParser):
         # use the dict in subclasses to keep track of mats per layer when parsing in render order
         self.last_mat_dict = dict()
         if not lastmat:
-            self.last_mat = Mat(parse_target = parse_target)
-            self.last_mat_dict[Mat.base_mat] = self.last_mat
+            self.last_mat = Mat()
+            self.last_mat_dict[Mat._base_layer] = self.last_mat
             self.last_mat.name = 0
         else:
             self.last_mat = lastmat
@@ -619,6 +619,7 @@ class DL(DataParser):
                 f3d_gbi.G_MTX: ("gsSPMatrix", PackedFormat(">3BL", (3,))),  # pad pad type seg_ptr
                 f3d_gbi.G_MOVEWORD: ("gsMoveWd", PackedFormat(">BHL", (2,), make_str = False)),  # dmem_index offset seg_ptr
                 # set other modes
+                f3d_gbi.G_QUAD: ("gsSP1Quadrangle", PackedFormat(">7B", make_str = False, post_unpack = lambda args: [a//2 for a in args])),  # v123 flag v456
             }
         elif f3d_gbi.F3DEX_GBI:
             self.f3dex2_cmd_gbi_names = dict()
@@ -681,7 +682,6 @@ class DL(DataParser):
                     ),  # leads w/ rdp half cmd, deal with later
                     f3d_gbi.G_TRI1: ("gsSP1Triangle", PackedFormat(">7B", make_str = False, post_unpack = lambda args: [a//2 for a in args])),  # v123 flag pad567
                     f3d_gbi.G_TRI2: ("gsSP2Triangles", PackedFormat(">7B", make_str = False, post_unpack = lambda args: [a//2 for a in args])),  # v123 flag v456
-                    f3d_gbi.G_QUAD: ("gsSP1Quadrangle", PackedFormat(">7B", make_str = False, post_unpack = lambda args: [a//2 for a in args])),  # v123 flag v456
                     f3d_gbi.G_POPMTX: ("gsSPPopMatrix", PackedFormat(">3BL")),  # pad123 num_mtx
                 }
             )
@@ -787,6 +787,7 @@ class DL(DataParser):
 
     def binary_cmd_get(self, parser: Parser) -> tuple[cmd_name:str, PackedFormat]:
         cmd_type = self.unpack_type(parser.cur_stream, parser.head, ">B", make_str=False)
+        print(hex(cmd_type), hex(parser.head))
         cmd_name, packed_fmt = self.all_f3d_gbi_cmds.get(cmd_type)
         parser.advance_head(1)
         # tex rects and maybe other cmds are longer
