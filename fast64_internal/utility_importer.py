@@ -206,9 +206,7 @@ class BinProcess:
                     # since unpack_type sometimes is not a list and sometimes is, I will
                     # force this result to be a list
                     num = v[2](output)
-                    output.append(
-                        self.unpack_type(start + k, v[1].format(num), ret_iterable=True)
-                    )
+                    output.append(self.unpack_type(start + k, v[1].format(num), ret_iterable=True))
                 else:
                     output.append(self.unpack_type(start + k, v[1], make_str=False))
             except:
@@ -229,12 +227,7 @@ class BinWrite:
             return "{" + ", ".join([f"{self.unroll_iter(a)}" for a in data]) + "}"
 
     def dataclass_str(self, cls):
-        return ", ".join(
-            [
-                f"/* {a.name} */ {self.unroll_iter(getattr(cls, a.name))}"
-                for a in fields(cls)
-            ]
-        )
+        return ", ".join([f"/* {a.name} */ {self.unroll_iter(getattr(cls, a.name))}" for a in fields(cls)])
 
     def dataclass_arr(self, data_arr):
         out = str()
@@ -253,6 +246,7 @@ class BinWrite:
             return f"{data}\n"
         for dat in data:
             return f"{dat}\n"
+
 
 # ------------------------------------------------------------------------
 #    Array Data parsing
@@ -407,7 +401,6 @@ class DataParser(BinProcess):
         flow_status = self._continue_parse
         while flow_status == self._continue_parse:
             cmd_name, packed_fmt = self.binary_cmd_get(parser)  # adv head if MSB not included in packed format
-            print(cmd_name, packed_fmt)
             arg_decode_func = getattr(self, f"_decode_cmd_{cmd_name.lower()}_bin", None)
             if arg_decode_func:
                 cmd_name, cmd_args, cmd_len = arg_decode_func(packed_fmt, parser)
@@ -476,7 +469,7 @@ class DataParser(BinProcess):
 
 # make something more generic here where user can supply their own function
 def evaluate_macro(line: str):
-    return False # gotta change this to not be sm64 specific...
+    return False  # gotta change this to not be sm64 specific...
     props = bpy.context.scene.fast64.sm64.importer
     if props.version in line:
         return False
@@ -623,16 +616,12 @@ def get_enum_struct_data_from_file(file: TextIO, type_dict, collated=False):
         match = re.search(array_bounds_regx, line, flags=re.IGNORECASE)
         if not match:
             match = re.search(equality_regx, line, flags=re.IGNORECASE)
-        type_collisions = [
-            type_name for type_name in type_dict.keys() if type_name in line
-        ]
+        type_collisions = [type_name for type_name in type_dict.keys() if type_name in line]
         if match and type_collisions:
             # there should ideally only be one collision
             type_name = type_collisions[0]
             # type_name plus any extra chars(non greedy) until a space
-            name_start = re.search(
-                f"{type_name}.*?\\s", line, flags=re.IGNORECASE
-            ).span()[1]
+            name_start = re.search(f"{type_name}.*?\\s", line, flags=re.IGNORECASE).span()[1]
             variable_name = line[name_start : match.span()[0]].strip()
             type_found = CDataArray(type_name, variable_name)
             continue
@@ -664,11 +653,7 @@ def get_enum_struct_data_from_file(file: TextIO, type_dict, collated=False):
     return (
         output_variables
         if collated
-        else {
-            vd_key: vd_value
-            for var_dict in output_variables.values()
-            for vd_key, vd_value in var_dict.items()
-        }
+        else {vd_key: vd_value for var_dict in output_variables.values() for vd_key, vd_value in var_dict.items()}
     )
 
 

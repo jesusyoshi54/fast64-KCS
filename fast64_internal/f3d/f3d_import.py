@@ -3,7 +3,7 @@
 # ------------------------------------------------------------------------
 from __future__ import annotations
 
-import bpy
+import bpy, bmesh
 
 import os, struct, math
 
@@ -17,10 +17,25 @@ from re import findall
 from numbers import Number
 from collections.abc import Sequence
 
-from ..f3d.f3d_material import F3DMaterialProperty, RDPSettings, TextureProperty
+from ..f3d.f3d_material import F3DMaterialProperty, RDPSettings, TextureProperty, getDefaultMaterialPreset, createF3DMat
 from ..f3d.f3d_gbi import get_F3D_GBI
+from ..f3d.f3d_enums import (
+    enumAlphaCompare,
+    enumAlphaDither,
+    enumRGBDither,
+    enumCombKey,
+    enumTextConv,
+    enumTextFilt,
+    enumTextLUT,
+    enumTextLOD,
+    enumTextDetail,
+    enumTextPersp,
+    enumCycleType,
+    enumColorDither,
+    enumPipelineMode,
+)
 
-from ..utility import hexOrDecInt, gammaInverse
+from ..utility import hexOrDecInt, gammaInverse, GetEnums
 from ..utility_importer import *
 from ..bin_png import convert_tex_c, convert_tex_bin
 
@@ -39,14 +54,14 @@ class LightParent:
     @staticmethod
     def ambient_from_binary(bin_file: BinaryIO, macro: Macro):
         # just get first color
-        col = [*struct.unpack(">3B", bin_file[macro.args[2]:macro.args[2] + 3]), 0xFF]
+        col = [*struct.unpack(">3B", bin_file[macro.args[2] : macro.args[2] + 3]), 0xFF]
         return col
 
     @staticmethod
     def diffuse_from_binary(bin_file: BinaryIO, macro: Macro):
         # just get first color
         # cls.dir = [*struct.unpack(">3B", bin_file[macro.args[2] + 8:macro.args[2] + 11]), 0xFF]
-        col = [*struct.unpack(">3B", bin_file[macro.args[2]:macro.args[2] + 3]), 0xFF]
+        col = [*struct.unpack(">3B", bin_file[macro.args[2] : macro.args[2] + 3]), 0xFF]
         return col
 
     # naming matches var types
@@ -71,8 +86,14 @@ class LightParent:
 
 # just holds common methods for tiles & textures
 class TexBase:
+    def check_tex_hack(self):
+        # check for hacky 4b loading
+        if "RGBA" in self.fmt and "4b" in self.siz:
+            self.siz = "16b"
+
     # sometimes int args are used so convert them all to str DEFs
     def standardize_fields(self):
+        self.check_tex_hack()
         if self.fmt.isnumeric():
             fmt_types = {0: "RGBA", 2: "CI", 3: "IA", 4: "I"}
             self.fmt = f"G_IM_FMT_{fmt_types.get(int(self.fmt))}"
@@ -81,6 +102,7 @@ class TexBase:
             self.siz = f"G_IM_SIZ_{siz_types.get(int(self.siz))}"
 
     def eval_texture_format(self):
+        self.check_tex_hack()
         return f"{self.fmt.replace('G_IM_FMT_','')}{self.siz.replace('G_IM_SIZ_','').replace('b','')}"
 
 
@@ -114,7 +136,7 @@ class Texture(TexBase):
     pal: bool = False
     dxt: int = 0
     texels: int = 0
-    num_bytes: int = 0 # to be filled in after self.determine_size
+    num_bytes: int = 0  # to be filled in after self.determine_size
 
     def determine_size(self):
         # dxt is a ratio between words and lines of a texture
@@ -216,7 +238,7 @@ class Mat:
             self.layer = self._base_layer
         else:
             self.layer = layer
-        self.bin_file = bin_file # theoretically could be different for each mat
+        self.bin_file = bin_file  # theoretically could be different for each mat
 
     # calc the hash for an f3d mat and see if its equal to this mats hash
     def mat_hash_f3d(self, f3d: F3DMaterialProperty):
@@ -295,14 +317,21 @@ class Mat:
     def convert_color(self, color: Sequence[Number]):
         return (*gammaInverse([int(a) / 255 for a in color[:3]]), int(color[3]) / 255)
 
-    def load_texture(self, ForceNewTex: bool, path: Path, tex: Texture):
+    def load_texture(self, force_new_tex: bool, textures: dict, path: Path, tex: Texture):
         if not tex:
             return None
-        tex_img = textures.get(tex.Timg)[0]
-        if "#include" in tex_img:
+        tex_img = textures.get(tex.tex_img)
+        if tex_img and "#include" in tex_img[0]:
             return self.load_texture_png(force_new_tex, textures, path, tex)
-        else:
-            return self.load_texture_array(force_new_tex, textures, path, tex, DataParser._c_parsing)
+        # ugly
+        elif tex_img or self.bin_file:
+            return self.load_texture_array(
+                force_new_tex,
+                textures,
+                path,
+                tex,
+                DataParser._c_parsing if not self.bin_file else DataParser._binary_parsing,
+            )
 
     def load_texture_array(self, force_new_tex: bool, textures: dict, path: Path, tex: Texture, parse_target: int):
         """
@@ -313,15 +342,15 @@ class Mat:
         # based on naming structure, you shouldn't have repeat texture names since they're ROM addresses
         if parse_target == DataParser._binary_parsing:
             name = f"tex_img_0x{tex.tex_img:X}"
-            if (i := bpy.data.images.get(name, None)):
+            if i := bpy.data.images.get(name, None):
                 return i
             tex_img = tex.tex_img
-            tex_img = self.bin_file[tex_img:tex_img + tex.num_bytes]
+            tex_img = self.bin_file[tex_img : tex_img + tex.num_bytes]
             # idk if this properly deals with multiple palettes...
             pal_img = self.pal.tex_img if self.pal else None
             if pal_img:
                 # determine if CI4 or CI8 and num colors
-                pal_img = self.bin_file[pal_img:pal_img + 32]
+                pal_img = self.bin_file[pal_img : pal_img + 32]
             image_texels = convert_tex_bin(
                 tex.fmt,
                 tex.width,
@@ -369,12 +398,12 @@ class Mat:
         if image:
             tex_node.image = image
 
-    def apply_material_settings(self, mat: bpy.types.Material, tex_path: Path):
+    def apply_material_settings(self, mat: bpy.types.Material, textures: dict, tex_path: Path):
         f3d = mat.f3d_mat
 
         self.set_texture_tile_mapping()
         self.set_register_settings(mat, f3d)
-        self.set_textures(f3d)
+        self.set_textures(f3d, textures, tex_path)
 
         with bpy.context.temp_override(material=mat):
             bpy.ops.material.update_f3d_nodes()
@@ -401,17 +430,23 @@ class Mat:
                 setattr(self, f"tex{tex_index}", tex)
 
     # TODO: add load texture call
-    def set_textures(self, f3d: F3DMaterialProperty, tex_path: Path):
+    def set_textures(self, f3d: F3DMaterialProperty, textures: dict, tex_path: Path):
         self.set_tex_scale(f3d)
         if self.tex0 and self.set_tex:
             self.tex0.standardize_fields()
             self.set_tex_settings(
-                f3d.tex0, self.load_texture(0, tex_path, self.tex0), self.tiles[0 + self.base_tile], self.tex0.tex_img
+                f3d.tex0,
+                self.load_texture(0, textures, tex_path, self.tex0),
+                self.tiles[0 + self.base_tile],
+                self.tex0.tex_img,
             )
         if self.tex1 and self.set_tex:
             self.tex1.standardize_fields()
             self.set_tex_settings(
-                f3d.tex1, self.load_texture(0, tex_path, self.tex1), self.tiles[1 + self.base_tile], self.tex1.tex_img
+                f3d.tex1,
+                self.load_texture(0, textures, tex_path, self.tex1),
+                self.tiles[1 + self.base_tile],
+                self.tex1.tex_img,
             )
 
     def set_fog(self, f3d: F3DMaterialProperty):
@@ -597,6 +632,91 @@ class DL(DataParser):
             self.last_mat = lastmat
         super().__init__(parse_target=parse_target)
 
+    def apply_mesh_data(self, obj: bpy.types.Object, mesh: bpy.types.Mesh, layer: int, tex_path: Path):
+        bpy.context.view_layer.objects.active = obj
+        ind = -1
+        new = -1
+        UVmap = obj.data.uv_layers.new(name="UVMap")
+        # I can get the available enums for color attrs with this func
+        vcol_enums = GetEnums(bpy.types.FloatColorAttribute, "data_type")
+        # enums were changed in a blender version, this should future proof it a little
+        if "FLOAT_COLOR" in vcol_enums:
+            e = "FLOAT_COLOR"
+        else:
+            e = "COLOR"
+        Vcol = obj.data.color_attributes.get("Col")
+        if not Vcol:
+            Vcol = obj.data.color_attributes.new(name="Col", type=e, domain="CORNER")
+        Valph = obj.data.color_attributes.get("Alpha")
+        if not Valph:
+            Valph = obj.data.color_attributes.new(name="Alpha", type=e, domain="CORNER")
+
+        b_mesh = bmesh.new()
+        b_mesh.from_mesh(mesh)
+        tris = b_mesh.faces
+        tris.ensure_lookup_table()
+        uv_map = b_mesh.loops.layers.uv.active
+        v_color = b_mesh.loops.layers.float_color["Col"]
+        v_alpha = b_mesh.loops.layers.float_color["Alpha"]
+
+        self.Mats.append([len(tris), 0])
+        for i, t in enumerate(tris):
+            if i > self.Mats[ind + 1][0]:
+                new = self.create_new_f3d_mat(self.Mats[ind + 1][1], obj, False)
+                ind += 1
+                if not new:
+                    new = len(mesh.materials) - 1
+                    mat = mesh.materials[new]
+                    mat.name = "F3D Mat {} {}".format(obj.name, new)
+                    self.Mats[new][1].apply_material_settings(mat, self.Textures, tex_path)
+                else:
+                    # I tried to re use mat slots but it is much slower, and not as accurate
+                    # idk if I was just doing it wrong or the search is that much slower, but this is easier
+                    mesh.materials.append(new)
+                    new = len(mesh.materials) - 1
+            # if somehow there is no material assigned to the triangle or something is lost
+            if new != -1:
+                self.apply_loop_data(new, mesh, t, uv_map, v_color, v_alpha)
+        b_mesh.to_mesh(mesh)
+
+    def apply_loop_data(self, mat: bpy.Types.Material, mesh: bpy.Types.Mesh, tri, uv_map, v_color, v_alpha):
+        tri.material_index = mat
+        # Get texture size or assume 32, 32 otherwise
+        i = mesh.materials[mat].f3d_mat.tex0.tex
+        if not i:
+            WH = (32, 32)
+        else:
+            WH = i.size
+        # Set UV data and Vertex Color Data
+        for v, l in zip(tri.verts, tri.loops):
+            uv = self.UVs[v.index]
+            vcol = self.VCs[v.index]
+            # scale verts
+            l[uv_map].uv = [a * (1 / (32 * b)) if b > 0 else a * 0.001 * 32 for a, b in zip(uv, WH)]
+            # idk why this is necessary. N64 thing or something?
+            if self.parsing_target == DataParser._binary_parsing:
+                flip = 1
+            else:
+                flip = -1
+            l[uv_map].uv[1] = l[uv_map].uv[1] * flip + 1
+            l[v_color] = [*gammaInverse([a / 255 for a in vcol]), 255]
+            l[v_alpha] = [vcol[3] / 255 for i in range(4)]
+
+    # create a new f3d_mat given an Mat class but don't create copies with same props
+    def create_new_f3d_mat(self, mat: Mat, obj: bpy.types.Object, force_new_tex: bool):
+        if force_new_tex:
+            # check if this mat was used already in another mesh (or this mat if DL is suboptimal or something)
+            # even looping n^2 is probably faster than duping 3 mats with blender speed
+            for j, F3Dmat in enumerate(bpy.data.materials):
+                if F3Dmat.is_f3d:
+                    dupe = mat.mat_hash_f3d(F3Dmat.f3d_mat)
+                    if dupe:
+                        return F3Dmat
+        # make new mat
+        preset = getDefaultMaterialPreset("Shaded Solid")
+        createF3DMat(obj, preset)
+        return None
+
     # MSB: (name, PackedFormat), ones empty PackedFormat have no support yet
     # f3d class changes its var values based on f3d type, so f3d_gbi.G_TRI1 matches correct MSB
     def setup_unpack_dicts(self):
@@ -608,18 +728,26 @@ class DL(DataParser):
             self.f3dex2_cmd_gbi_names = {
                 f3d_gbi.G_VTX: (
                     "gsSPVertexBin",
-                    PackedFormat(">7B", (2,), reorder = (1, 2, 3), make_str = False, bit_packing=(4, 8, 4, 8, 32)),
+                    PackedFormat(">7B", (2,), reorder=(1, 2, 3), make_str=False, bit_packing=(4, 8, 4, 8, 32)),
                 ),  # pad num_v offset+num seg_ptr, reorder -> num offset ptr
                 f3d_gbi.G_DMA_IO: (
                     "gsSPDma_io",
                     PackedFormat(">7B", bit_packing=(1, 10, 1, 12, 32)),
                 ),  # i/o dmem_addr siz dram_addr
                 f3d_gbi.G_POPMTX: ("gsSPPopMatrix", PackedFormat(">3BL")),  # pad123 num_mtx
-                f3d_gbi.G_GEOMETRYMODE: ("gsSPGeometryMode", PackedFormat(">7B", bit_packing=(24, 32), post_unpack = self.parse_geo_flags)),  # clear set
+                f3d_gbi.G_GEOMETRYMODE: (
+                    "gsSPGeometryMode",
+                    PackedFormat(">7B", bit_packing=(24, 32), post_unpack=self.parse_geo_flags),
+                ),  # clear set
                 f3d_gbi.G_MTX: ("gsSPMatrix", PackedFormat(">3BL", (3,))),  # pad pad type seg_ptr
-                f3d_gbi.G_MOVEWORD: ("gsMoveWd", PackedFormat(">BHL", (2,), make_str = False)),  # dmem_index offset seg_ptr
-                # set other modes
-                f3d_gbi.G_QUAD: ("gsSP1Quadrangle", PackedFormat(">7B", make_str = False, post_unpack = lambda args: [a//2 for a in args])),  # v123 flag v456
+                f3d_gbi.G_MOVEWORD: (
+                    "gsMoveWd",
+                    PackedFormat(">BHL", (2,), make_str=False),
+                ),  # dmem_index offset seg_ptr
+                f3d_gbi.G_QUAD: (
+                    "gsSP1Quadrangle",
+                    PackedFormat(">7B", make_str=False, post_unpack=lambda args: [a // 2 for a in args]),
+                ),  # v123 flag v456
             }
         elif f3d_gbi.F3DEX_GBI:
             self.f3dex2_cmd_gbi_names = dict()
@@ -629,18 +757,20 @@ class DL(DataParser):
                 f3d_gbi.G_MTX: ("gsSPMatrix", PackedFormat(">BhL", (2,))),  # type pad seg_ptr
                 f3d_gbi.G_VTX: (
                     "gsSPVertexBin",
-                    PackedFormat(">7B", (2,), reorder = (1, 0, 3), make_str = False, bit_packing=(8, 6, 10, 32)),
+                    PackedFormat(">7B", (2,), reorder=(1, 0, 3), make_str=False, bit_packing=(8, 6, 10, 32)),
                 ),  # buf_start num_vert len_dat vtx_ptr, reorder -> num offset ptr
                 f3d_gbi.G_SETGEOMETRYMODE: (
                     "gsSPSetGeometryMode",
-                    PackedFormat(">7B", bit_packing=(24, 32), reorder = (1,), post_unpack = self.parse_geo_flags),
+                    PackedFormat(">7B", bit_packing=(24, 32), reorder=(1,), post_unpack=self.parse_geo_flags),
                 ),  # pad word
                 f3d_gbi.G_CLEARGEOMETRYMODE: (
                     "gsSPClearGeometryMode",
-                    PackedFormat(">7B", bit_packing=(24, 32), reorder = (1,), post_unpack = self.parse_geo_flags),
+                    PackedFormat(">7B", bit_packing=(24, 32), reorder=(1,), post_unpack=self.parse_geo_flags),
                 ),  # word pad
-                # set other mode, L and H?
-                f3d_gbi.G_MOVEWORD: ("gsMoveWd", PackedFormat(">HBL", (2,), make_str = False)),  # offset dmem_index seg_ptr
+                f3d_gbi.G_MOVEWORD: (
+                    "gsMoveWd",
+                    PackedFormat(">HBL", (2,), make_str=False),
+                ),  # offset dmem_index seg_ptr
             }
         else:
             self.f3dex_cmd_gbi_names = dict()
@@ -648,28 +778,48 @@ class DL(DataParser):
 
             self.f3d_cmd_gbi_names = {
                 f3d_gbi.G_MTX: ("gsSPMatrix", PackedFormat(">BhL", (2,))),  # type pad seg_ptr
-                f3d_gbi.G_MOVEMEM: ("gsSPMoveMem", PackedFormat(">BHL", (2,), make_str = False)),  # dmem_index siz mem_ptr
+                f3d_gbi.G_MOVEMEM: (
+                    "gsSPMoveMem",
+                    PackedFormat(">BHL", (2,), make_str=False),
+                ),  # dmem_index siz mem_ptr
                 f3d_gbi.G_VTX: (
                     "gsSPVertexBin",
-                    PackedFormat(">7B", (2,), reorder = (0, 1, 3), make_str = False, bit_packing=(4, 4, 16, 32), post_unpack = self.f3d_g_vertex_parse),
+                    PackedFormat(
+                        ">7B",
+                        (2,),
+                        reorder=(0, 1, 3),
+                        make_str=False,
+                        bit_packing=(4, 4, 16, 32),
+                        post_unpack=self.f3d_g_vertex_parse,
+                    ),
                 ),  # num_vert buf_start len_dat vtx_ptr, reorder -> num offset ptr
                 f3d_gbi.G_SETGEOMETRYMODE: (
                     "gsSPSetGeometryMode",
-                    PackedFormat(">7B", bit_packing=(24, 32), reorder = (1,), post_unpack = self.parse_geo_flags),
+                    PackedFormat(">7B", bit_packing=(24, 32), reorder=(1,), post_unpack=self.parse_geo_flags),
                 ),  # pad word
                 f3d_gbi.G_CLEARGEOMETRYMODE: (
                     "gsSPClearGeometryMode",
-                    PackedFormat(">7B", bit_packing=(24, 32), reorder = (1,), post_unpack = self.parse_geo_flags),
+                    PackedFormat(">7B", bit_packing=(24, 32), reorder=(1,), post_unpack=self.parse_geo_flags),
                 ),  # pad word
-                # set other mode, L and H?
-                f3d_gbi.G_MOVEWORD: ("gsMoveWd", PackedFormat(">HBL", (2,), make_str = False)),  # offset dmem_index seg_ptr
+                f3d_gbi.G_MOVEWORD: (
+                    "gsMoveWd",
+                    PackedFormat(">HBL", (2,), make_str=False),
+                ),  # offset dmem_index seg_ptr
                 f3d_gbi.G_POPMTX: ("gsSPPopMatrix", PackedFormat(">7B")),  # pads
-                f3d_gbi.G_TRI1: ("gsSP1Triangle", PackedFormat(">7B", make_str = False, reorder = (4, 5, 6, 3), post_unpack = lambda args: [a//10 for a in args])),  # pad123 flag v123, reorder v123 flag
+                f3d_gbi.G_TRI1: (
+                    "gsSP1Triangle",
+                    PackedFormat(
+                        ">7B", make_str=False, reorder=(4, 5, 6, 3), post_unpack=lambda args: [a // 10 for a in args]
+                    ),
+                ),  # pad123 flag v123, reorder v123 flag
             }
         if f3d_gbi.F3DEX_GBI or f3d_gbi.F3DLP_GBI or f3d_gbi.F3DEX_GBI_2:
             self.f3dex_cmd_gbi_names.update(
                 {
-                    f3d_gbi.G_MOVEMEM: ("gsSPMoveMem", PackedFormat(">3BL", (3,), make_str = False, reorder=(0, 2, 3, 1))),  # size offset dmem_index seg_ptr, reorder -> index siz seg_ptr offset
+                    f3d_gbi.G_MOVEMEM: (
+                        "gsSPMoveMem",
+                        PackedFormat(">3BL", (3,), make_str=False, reorder=(0, 2, 3, 1)),
+                    ),  # size offset dmem_index seg_ptr, reorder -> index siz seg_ptr offset
                     f3d_gbi.G_MODIFYVTX: ("gsSPModifyVertex", PackedFormat(">BHl")),  # enum buf_index new_val
                     f3d_gbi.G_CULLDL: ("gsSPCullDisplayList", PackedFormat(">7B")),  # I'll just be ignoring this anyway
                     f3d_gbi.G_BRANCH_Z: (
@@ -680,8 +830,14 @@ class DL(DataParser):
                         "gsSPLoadUcodeEx",
                         PackedFormat(">15B"),
                     ),  # leads w/ rdp half cmd, deal with later
-                    f3d_gbi.G_TRI1: ("gsSP1Triangle", PackedFormat(">7B", make_str = False, post_unpack = lambda args: [a//2 for a in args])),  # v123 flag pad567
-                    f3d_gbi.G_TRI2: ("gsSP2Triangles", PackedFormat(">7B", make_str = False, post_unpack = lambda args: [a//2 for a in args])),  # v123 flag v456
+                    f3d_gbi.G_TRI1: (
+                        "gsSP1Triangle",
+                        PackedFormat(">7B", make_str=False, post_unpack=lambda args: [a // 2 for a in args]),
+                    ),  # v123 flag pad567
+                    f3d_gbi.G_TRI2: (
+                        "gsSP2Triangles",
+                        PackedFormat(">7B", make_str=False, post_unpack=lambda args: [a // 2 for a in args]),
+                    ),  # v123 flag v456
                     f3d_gbi.G_POPMTX: ("gsSPPopMatrix", PackedFormat(">3BL")),  # pad123 num_mtx
                 }
             )
@@ -694,6 +850,15 @@ class DL(DataParser):
                 "gsSPTexture",
                 PackedFormat(">7B", reorder=(4, 5, 1, 2, 3), bit_packing=(10, 3, 3, 8, 16, 16)),
             ),  # pad lod_lvl tile en s t, reorder s t lod_lvl tile en
+            f3d_gbi.G_SETOTHERMODE_H: (
+                "gsSPSetOtherMode_H",
+                PackedFormat(">3BL", make_str=False),
+            ),  # bit_shift num_bits mode_bits
+            f3d_gbi.G_SETOTHERMODE_L: (
+                "gsSPSetOtherMode_L",
+                PackedFormat(">3BL", make_str=False),
+            ),  # bit_shift num_bits mode_bits
+            # set other modes
         }
         self.rdp_cmd_gbi_names = {
             f3d_gbi.G_SETCIMG: ("gsDPSetColorImage", PackedFormat(">7B")),  # bpy ignores
@@ -704,7 +869,12 @@ class DL(DataParser):
             ),  # fmt siz pad im_ptr
             f3d_gbi.G_SETCOMBINE: (
                 "gsDPSetCombineLERP",
-                PackedFormat(">7B", bit_packing=(4, 5, 3, 3, 4, 5, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3), reorder = (0, 6, 1, 10, 2, 11, 3, 12, 4, 7, 5, 13, 8, 14, 9, 15), post_unpack = self.parse_color_combiner),
+                PackedFormat(
+                    ">7B",
+                    bit_packing=(4, 5, 3, 3, 4, 5, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3),
+                    reorder=(0, 6, 1, 10, 2, 11, 3, 12, 4, 7, 5, 13, 8, 14, 9, 15),
+                    post_unpack=self.parse_color_combiner,
+                ),
             ),  # clr_a_1 clr_c_1 alpha_a_1 alpha_c_1 clr_a_2 clr_c_2 clr_b_1 clr_d_1 alpha_b_1 alpha_d_1 clr_b_2 alpha_a_2 alpha_c_2 clr_d_2 alpha_b_2 alpha_d_2
             f3d_gbi.G_SETENVCOLOR: ("gsDPSetEnvColor", PackedFormat(">Bh4B")),  # pad pad rgba
             f3d_gbi.G_SETPRIMCOLOR: ("gsDPSetPrimColor", PackedFormat(">7B")),  # pad minLod loc_frac rgba
@@ -717,7 +887,11 @@ class DL(DataParser):
             ),  # ul_s ul_t pad tile width height
             f3d_gbi.G_SETTILE: (
                 "gsDPSetTile",
-                PackedFormat(">7B", reorder = (0, 1, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13), bit_packing=(3, 2, 1, 9, 9, 5, 3, 4, 2, 4, 4, 2, 4, 4)),
+                PackedFormat(
+                    ">7B",
+                    reorder=(0, 1, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13),
+                    bit_packing=(3, 2, 1, 9, 9, 5, 3, 4, 2, 4, 4, 2, 4, 4),
+                ),
             ),  # fmt siz pad num_64_bit_vals tmem pad tile palette t_flag t_mask t_shift s_flag s_mask s_shift, reoder -> remove pads
             f3d_gbi.G_LOADTILE: (
                 "gsDPLoadTile",
@@ -725,7 +899,7 @@ class DL(DataParser):
             ),  # ul_s ul_t pad tile width height
             f3d_gbi.G_LOADBLOCK: (
                 "gsDPLoadBlock",
-                PackedFormat(">7B", reorder = (3, 0, 1, 4, 5), bit_packing=(12, 12, 4, 4, 12, 12)),
+                PackedFormat(">7B", reorder=(3, 0, 1, 4, 5), bit_packing=(12, 12, 4, 4, 12, 12)),
             ),  # ul_s ul_t pad tile texels dxt, reorder -> tile ul_s ul_t texels dxt
             f3d_gbi.G_SETTILESIZE: (
                 "gsDPSetTileSize",
@@ -733,10 +907,10 @@ class DL(DataParser):
             ),  # ul_s ul_t tile width height
             f3d_gbi.G_LOADTLUT: (
                 "gsDPLoadTLUTCmd",
-                PackedFormat(">7B", reorder = (1, 2), bit_packing=(28, 4, 12, 12)),
+                PackedFormat(">7B", reorder=(1, 2), bit_packing=(28, 4, 12, 12)),
             ),  # pad tile clr_cnt pad, reorder -> tile clr_cnt
             f3d_gbi.G_RDPSETOTHERMODE: (
-                "gsSPSetOtherMode",
+                "gsDPSetOtherMode",
                 PackedFormat(">3BL"),
             ),  # higher_bits (need to combine) lower_bits
             f3d_gbi.G_SETPRIMDEPTH: ("gsDPSetPrimDepth", PackedFormat(">B3h")),  # pad pad z_val delta_z
@@ -803,10 +977,7 @@ class DL(DataParser):
             cmd_args = self.unpack_type(parser.cur_stream, parser.head, packed_fmt, ret_iterable=True)
         return cmd_args, packed_fmt.format_size
 
-    def parse_stream_DL(self, start_name: Union[str, int]):
-        """
-        Initialize vars and then parse data stream
-        """
+    def init_stream(self):
         self.VertBuff = [0] * 32  # turbo 3d in shambles
         self.Verts = []
         self.Tris = []
@@ -817,6 +988,18 @@ class DL(DataParser):
         self.Lights.update(self.Light_t)
         self.Lights.update(self.Ambient_t)
         self.last_mat.bin_file = self.bin_file
+
+    def parse_stream_DL(self, start_name: Union[str, int]):
+        """
+        Initialize vars and then parse data stream
+        """
+        self.init_stream
+        self.parse_stream(self.get_new_stream(start_name), start_name)
+
+    def continue_stream_DL(self, start_name: Union[str, int]):
+        """
+        Parse stream assuming vars already initialized
+        """
         self.parse_stream(self.get_new_stream(start_name), start_name)
 
     def gsSPEndDisplayList(self, macro: Macro):
@@ -856,7 +1039,10 @@ class DL(DataParser):
     def gsSPVertexBin(self, macro: Macro):
         start = macro.args[1]
         length = macro.args[0]
-        v_data = [self.unpack_type(self.bin_file, macro.args[2] + off*0x10, ">3hH2h4B", make_str = False) for off in range(length)]
+        v_data = [
+            self.unpack_type(self.bin_file, macro.args[2] + off * 0x10, ">3hH2h4B", make_str=False)
+            for off in range(length)
+        ]
 
         for k, i in enumerate(range(start, length, 1)):
             self.VertBuff[i] = [v_data[k], start]
@@ -948,12 +1134,40 @@ class DL(DataParser):
     def gsSPMoveMem(self, macro: Macro):
         # dmem_index siz mem_ptr
         # just check for lights
-        dmem_indices = {12: 'G_MV_POINT', 14: 'G_MV_MATRIX', 0: 'G_MV_LOOKATX', 24: 'G_MV_LOOKATY', 48: 'G_MV_L0', 72: 'G_MV_L1', 96: 'G_MV_L2', 120: 'G_MV_L3', 144: 'G_MV_L5', 168: 'G_MV_L5', 192: 'G_MV_L6', 216: 'G_MV_L7', 128: 'G_MV_VIEWPORT', 130: 'G_MV_LOOKATY', 132: 'G_MV_LOOKATX', 134: 'G_MV_L0', 136: 'G_MV_L1', 138: 'G_MV_L2', 140: 'G_MV_L3', 142: 'G_MV_L4', 146: 'G_MV_L6', 148: 'G_MV_L7', 150: 'G_MV_TXTATT', 158: 'G_MV_MATRIX_1', 152: 'G_MV_MATRIX_2', 154: 'G_MV_MATRIX_3', 156: 'G_MV_MATRIX_4'}
+        dmem_indices = {
+            12: "G_MV_POINT",
+            14: "G_MV_MATRIX",
+            0: "G_MV_LOOKATX",
+            24: "G_MV_LOOKATY",
+            48: "G_MV_L0",
+            72: "G_MV_L1",
+            96: "G_MV_L2",
+            120: "G_MV_L3",
+            144: "G_MV_L5",
+            168: "G_MV_L5",
+            192: "G_MV_L6",
+            216: "G_MV_L7",
+            128: "G_MV_VIEWPORT",
+            130: "G_MV_LOOKATY",
+            132: "G_MV_LOOKATX",
+            134: "G_MV_L0",
+            136: "G_MV_L1",
+            138: "G_MV_L2",
+            140: "G_MV_L3",
+            142: "G_MV_L4",
+            146: "G_MV_L6",
+            148: "G_MV_L7",
+            150: "G_MV_TXTATT",
+            158: "G_MV_MATRIX_1",
+            152: "G_MV_MATRIX_2",
+            154: "G_MV_MATRIX_3",
+            156: "G_MV_MATRIX_4",
+        }
         index = dmem_indices.get(macro.args[0], None)
         if "G_MV_L" in index:
             light_num = int(re.search("\d", index).group())
             if light_num >= self.last_mat.num_lights:
-                self.last_mat.ambient_light =  LightParent.ambient_from_binary(self.bin_file, macro)
+                self.last_mat.ambient_light = LightParent.ambient_from_binary(self.bin_file, macro)
             else:
                 self.last_mat.light_col[light_num] = LightParent.diffuse_from_binary(self.bin_file, macro)
         return self._continue_parse
@@ -1003,7 +1217,6 @@ class DL(DataParser):
     def gsSPSetLights1(self, macro: Macro):
         return self._continue_parse
 
-
     def gsSPSetLights2(self, macro: Macro):
         return self._continue_parse
 
@@ -1022,7 +1235,59 @@ class DL(DataParser):
     def gsSPSetLights7(self, macro: Macro):
         return self._continue_parse
 
-    def gsSPSetOtherMode(self, macro: Macro):
+    # helper for othermode, gets first item from enum
+    def first_from_enum(self, enum: list[tuple]):
+        return [val[0] for val in enum]
+
+    def gsSPSetOtherMode_H(self, macro: Macro):
+        mask = ((1 << macro.args[2]) - 1) << macro.args[1]
+        data = macro.args[3] & mask
+
+        def set_mode_data(shift: int, num_bits: int, enum: list[tuple], call: callable, vals: list = None):
+            mode_bits = ((1 << num_bits) - 1) << shift
+            # for modes that don't use all bit combos
+            if not vals:
+                vals = range(2**num_bits)
+            if mask & mode_bits:
+                mode_data = data & mode_bits
+                mode_options = {a << shift: self.first_from_enum(enum) for a in vals}
+                call(Macro("", mode_options.get(mode_data)))
+
+        set_mode_data(self.f3d_gbi.G_MDSFT_ALPHADITHER, 2, enumAlphaDither, self.gsDPSetAlphaCompare)
+        set_mode_data(self.f3d_gbi.G_MDSFT_RGBDITHER, 2, enumRGBDither, self.gsDPSetColorDither)
+        set_mode_data(self.f3d_gbi.G_MDSFT_COMBKEY, 1, enumCombKey, self.gsDPSetCombineKey)
+        set_mode_data(self.f3d_gbi.G_MDSFT_TEXTCONV, 3, enumTextConv, self.gsDPSetTextureConvert, vals=[0, 5, 6])
+        set_mode_data(self.f3d_gbi.G_MDSFT_TEXTFILT, 2, enumTextFilt, self.gsDPSetTextureFilter, vals=[0, 2, 3])
+        set_mode_data(self.f3d_gbi.G_MDSFT_TEXTLUT, 2, enumTextLUT, self.gsDPSetTextureLUT, vals=[0, 2, 3])
+        set_mode_data(self.f3d_gbi.G_MDSFT_TEXTLOD, 1, enumTextLOD, self.gsDPSetTextureLOD)
+        set_mode_data(self.f3d_gbi.G_MDSFT_TEXTDETAIL, 2, enumTextDetail, self.gsDPSetTextureDetail, vals=[0, 2, 3])
+        set_mode_data(self.f3d_gbi.G_MDSFT_TEXTPERSP, 1, enumTextPersp, self.gsDPSetTexturePersp)
+        set_mode_data(self.f3d_gbi.G_MDSFT_CYCLETYPE, 2, enumCycleType, self.gsDPSetCycleType)
+        set_mode_data(self.f3d_gbi.G_MDSFT_COLORDITHER, 1, enumColorDither, self.gsDPSetColorDither)
+        set_mode_data(self.f3d_gbi.G_MDSFT_PIPELINE, 1, enumPipelineMode, self.gsDPPipelineMode)
+        return self._continue_parse
+
+    def gsSPSetOtherMode_L(self, macro: Macro):
+        mask = ((1 << macro.args[2]) - 1) << macro.args[1]
+        data = macro.args[3] & mask
+        # ignore this for now
+        if mask & 0xFFFFFFF8:
+            render_mode = data & 0xFFFFFFF8
+        if mask & 4:
+            mode_data = data & 0x4
+            self.gsDPSetDepthSource(macro.partial("G_ZS_PRIM" if mode_data else "G_ZS_PIXEL"))
+        if mask & 3:
+            mode_data = data & 0x3
+            mode_options = {
+                0: "G_AC_NONE",
+                1 << self.f3d_gbi.G_MDSFT_ALPHACOMPARE: "G_AC_THRESHOLD",
+                3 << self.f3d_gbi.G_MDSFT_ALPHACOMPARE: "G_AC_DITHER",
+            }
+            self.gsDPSetAlphaCompare(macro.partial(mode_options.get(mode_data)))
+        return self._continue_parse
+
+    # this is kind of wacky?
+    def gsDPSetOtherMode(self, macro: Macro):
         self.NewMat = 1
         if macro.args[0] == "G_SETOTHERMODE_H":
             for i, othermode in enumerate(macro.args[3].split("|")):
@@ -1146,6 +1411,7 @@ class DL(DataParser):
                 if flag_val and ((arg & flag_val) == flag_val):
                     used_flags.append(flag)
             return " | ".join(used_flags)
+
         return [get_flags(arg) for arg in args]
 
     def gsSPClearGeometryMode(self, macro: Macro):
@@ -1190,14 +1456,40 @@ class DL(DataParser):
 
     # uses bitwise unpacking
     def parse_color_combiner(self, args: list[int]):
-        a = {0: 'COMBINED', 1: 'TEXEL0', 2: 'TEXEL1', 3: 'PRIMITIVE', 4: 'SHADE', 5: 'ENVIRONMENT', 6: '1', 7: 'NOISE'}
-        b = {0: 'COMBINED', 1: 'TEXEL0', 2: 'TEXEL1', 3: 'PRIMITIVE', 4: 'SHADE', 5: 'ENVIRONMENT', 6: 'CENTER', 7: 'K4'}
-        c = {0: 'COMBINED', 1: 'TEXEL0', 2: 'TEXEL1', 3: 'PRIMITIVE', 4: 'SHADE', 5: 'ENVIRONMENT', 6: 'SCALE', 7: 'COMBINED_ALPHA', 8: 'TEXEL0_ALPHA', 9: 'TEXEL1_ALPHA', 10: 'PRIMITIVE_ALPHA', 11: 'SHADE_ALPHA', 12: 'ENV_ALPHA', 13: 'LOD_FRACTION', 14: 'PRIM_LOD_FRAC', 15: 'K5'}
-        d = {0: 'COMBINED', 1: 'TEXEL0', 2: 'TEXEL1', 3: 'PRIMITIVE', 4: 'SHADE', 5: 'ENVIRONMENT', 6: '1', 7: '0'}
-        aa = {0: 'COMBINED', 1: 'TEXEL0', 2: 'TEXEL1', 3: 'PRIMITIVE', 4: 'SHADE', 5: 'ENVIRONMENT', 6: '1', 7: '0'}
-        ba = {0: 'COMBINED', 1: 'TEXEL0', 2: 'TEXEL1', 3: 'PRIMITIVE', 4: 'SHADE', 5: 'ENVIRONMENT', 6: '1', 7: '0'}
-        ca = da= aa
-        return [d.get(val, 0) for val, d in zip(args, [a,b,c,d,aa,ba,ca,da]*2)]
+        a = {0: "COMBINED", 1: "TEXEL0", 2: "TEXEL1", 3: "PRIMITIVE", 4: "SHADE", 5: "ENVIRONMENT", 6: "1", 7: "NOISE"}
+        b = {
+            0: "COMBINED",
+            1: "TEXEL0",
+            2: "TEXEL1",
+            3: "PRIMITIVE",
+            4: "SHADE",
+            5: "ENVIRONMENT",
+            6: "CENTER",
+            7: "K4",
+        }
+        c = {
+            0: "COMBINED",
+            1: "TEXEL0",
+            2: "TEXEL1",
+            3: "PRIMITIVE",
+            4: "SHADE",
+            5: "ENVIRONMENT",
+            6: "SCALE",
+            7: "COMBINED_ALPHA",
+            8: "TEXEL0_ALPHA",
+            9: "TEXEL1_ALPHA",
+            10: "PRIMITIVE_ALPHA",
+            11: "SHADE_ALPHA",
+            12: "ENV_ALPHA",
+            13: "LOD_FRACTION",
+            14: "PRIM_LOD_FRAC",
+            15: "K5",
+        }
+        d = {0: "COMBINED", 1: "TEXEL0", 2: "TEXEL1", 3: "PRIMITIVE", 4: "SHADE", 5: "ENVIRONMENT", 6: "1", 7: "0"}
+        aa = {0: "COMBINED", 1: "TEXEL0", 2: "TEXEL1", 3: "PRIMITIVE", 4: "SHADE", 5: "ENVIRONMENT", 6: "1", 7: "0"}
+        ba = {0: "COMBINED", 1: "TEXEL0", 2: "TEXEL1", 3: "PRIMITIVE", 4: "SHADE", 5: "ENVIRONMENT", 6: "1", 7: "0"}
+        ca = da = aa
+        return [d.get(val, 0) for val, d in zip(args, [a, b, c, d, aa, ba, ca, da] * 2)]
 
     def gsDPSetCombineMode(self, macro: Macro):
         self.NewMat = 1
