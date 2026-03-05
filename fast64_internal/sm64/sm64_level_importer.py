@@ -1,17 +1,8 @@
-# ------------------------------------------------------------------------
-#    Header
-# ------------------------------------------------------------------------
-
 # TODO:
-# fix set tile flags for binary?
-# clean up code base, remove existing sm64 binary importer
-# make sure props play nice in prop updating system
-
+# Add support for special objects
 # stretch goals
 # deal with direct DLs instead of geos (model metal box for example)
-# make rooms work better? (currently imports but definetly not good for export)
 # make layer detection work better?
-# add function and class descriptors per spec (triple quotes)
 # make better naming for certain vars
 # try to fix edge cases and any weird importing stuff (basically lots of testing, it feels mostly good but this must be done last)
 
@@ -288,6 +279,11 @@ class Area:
 
 
 class Level(DataParser):
+    """DataParser for level scripts, run parse_level_script to get data, entry point is anywhere in bin files, level specific script start for C
+
+    Use parse_level_script helper function to setup and run Level script parser properly
+    """
+
     # class data
     _skippable_cmds = {
         "LOAD_MARIO_HEAD",
@@ -461,6 +457,7 @@ class Level(DataParser):
         return cmd_name, packed_fmt
 
     def load_segment_two(self, bin_file: BinaryIO):
+        """Loads segment two which is based on asm ran during game start"""
         start = self.unpack_type(bin_file, 0x3AC2, ">H", make_str=False) << 16
         start += self.unpack_type(bin_file, 0x3ACE, ">H", make_str=False)
         end = self.unpack_type(bin_file, 0x3AC6, ">H", make_str=False) << 16
@@ -468,16 +465,17 @@ class Level(DataParser):
         # mio0 for seg2 expands by 0x3156, from mio0 header 0xC
         self.banks.tlb[2] = [start + 0x3156, end + 0x3156]
 
-    def check_rom_manager(self, editor: bool = False, rom_manager: bool = True):
-        """
-        # custom hacks override the level script execute jump table (0x8038B914 -> 0x00108694) cmd 0x17 LOAD_RAW with a cmd in custom memory
-        # in vanilla it is 0x8037ECA4 -> 0x00FBA24
-        # the function goes to 0x80402000 -> 0x1204000
-        # in editor the override goes to 0x80401500 -> 0x1201500
-        # other versions of editor/rom manager may use other overrides but I doubt it's that common
-        # for debugging purposes, sSegmentTable is 0x8033B400
+    def check_rom_manager(self, editor: bool = False, rom_manager: bool = True) -> bool:
+        """Checks if bin_file is a RM, editor or vanilla ROM based on signatures
 
-        # check for version based on args, default is rom manager. False for vanilla, True if matching specific tool
+        custom hacks override the level script execute jump table (0x8038B914 -> 0x00108694) cmd 0x17 LOAD_RAW with a cmd in custom memory
+        in vanilla it is 0x8037ECA4 -> 0x00FBA24
+        the function goes to 0x80402000 -> 0x1204000
+        in editor the override goes to 0x80401500 -> 0x1201500
+        other versions of editor/rom manager may use other overrides but I doubt it's that common
+        for debugging purposes, sSegmentTable is 0x8033B400
+
+        check for version based on args, default is rom manager. False for vanilla, True if matching specific tool
         """
         load_raw_func_addr = self.unpack_type(self.bin_file, 0x00108694, ">L", make_str=False)
         if load_raw_func_addr == 0x8037ECA4:
@@ -490,15 +488,18 @@ class Level(DataParser):
     # update area terrain and geo_ptr
     def update_col_ptr(self, area_index: int):
         if self.areas[area_index].terrain:
-            self.areas[area_index].terrain = self.seg2phys(self.areas[area_index].terrain)
+            self.areas[area_index].col_file = self.seg2phys(self.areas[area_index].terrain)
 
     def update_geo_ptr(self, area_index: int):
         if self.areas[area_index].geo:
             self.areas[area_index].geo = self.seg2phys(self.areas[area_index].geo)
 
     def load_segment_E(self, area_index: int):
-        # for RM custom levels, segment 0xE has a hook on the CALL level script to dma new data to seg 0xE
-        # for blender purposes, this can just be emulated by calling this func before each area is parsed
+        """Loads segment 0xE after level script is done, call before parsing col/geo/f3d data
+
+        for RM custom levels, segment 0xE has a hook on the CALL level script to dma new data to seg 0xE
+        for blender purposes, this can just be emulated by calling this func before each area is parsed
+        """
         is_rm = self.check_rom_manager()
         if not is_rm:
             return
@@ -512,9 +513,10 @@ class Level(DataParser):
         self.banks.tlb[0x0E] = [start, end]
 
     # macro parsing funcs
-    # jump to new script, goes back via EXIT, not RETURN
-    # shouldn't matter though as long as game follows its own rules, can use normal recursion
     def EXECUTE(self, macro: Macro, col: bpy.types.Collection):
+        """jump to new script, goes back via EXIT, not RETURN
+        shouldn't matter though as long as game follows its own rules, can use normal recursion
+        """
         self.banks.tlb[macro.args[0]] = (macro.args[1], macro.args[2])
         if type(macro.args[-1]) is int:
             macro.args[-1] = self.seg2phys(macro.args[-1])
@@ -772,6 +774,8 @@ class ColTri:
 
 
 class Collision(DataParser):
+    """Data parser for collision files, use import_level_collision to setup"""
+
     def __init__(self, collision: list[str], scale: float, parse_target=DataParser._c_parsing):
         self.collision = collision  # will be none in binary
         self.scale = scale
@@ -983,19 +987,24 @@ class Collision(DataParser):
 
 
 class SM64_Material(Mat):
+    """Holds parsed material data to be written out to fast64 f3d materials with method apply_material_settings"""
+
     def load_texture(self, force_new_tex: bool, textures: dict, path: Path, tex: Texture):
         if not tex:
             return None
+        # TODO
         # for some reason I can't get the parsing target to be what I want, so read props instead
         # would like for this to be better
         if bpy.context.scene.fast64.sm64.importer.import_target == "Binary":
             return self.load_texture_array(force_new_tex, textures, path, tex, DataParser._binary_parsing)
         else:
-            tex_img = textures.get(tex.tex_img)[0]
-        if "#include" in tex_img:
+            tex_img = textures.get(tex.tex_img)
+        if tex_img and "#include" in tex_img[0]:
             return self.load_texture_png(force_new_tex, textures, path, tex)
-        else:
+        elif tex_img:
             return self.load_texture_array(force_new_tex, textures, path, tex)
+        else:
+            print(f"No tex_img found for tex {tex}")
 
     def load_texture_png(self, force_new_tex: bool, textures: dict, path: Path, tex: Texture):
         tex_img = textures.get(tex.tex_img)[0].split("/")[-1]
@@ -1072,14 +1081,17 @@ class SM64_Material(Mat):
 
 
 class SM64_F3D(DL):
+    """DataParser for display lists, must gather sm64 specific data before parsing with get_f3d_data_from_model"""
+
     def __init__(self, scene, parse_target: int = DataParser._c_parsing):
         self.scene = scene
         self.props = scene.fast64.sm64.importer
         super().__init__(lastmat=SM64_Material(), parse_target=parse_target)
 
-    # Textures only contains the texture data found inside the model.inc.c file and the texture.inc.c file
-    # this will add all the textures located in the /textures/ folder in decomp
     def get_generic_textures(self, root_path: Path):
+        """Add all the textures located in the /textures/ folder in decomp to Textures dict
+        without this, Textures only contains the texture data found inside the model.inc.c file and the texture.inc.c file
+        """
         # check that there is a textures directory
         if not (tex_path := root_path / "textures").exists():
             raise Exception("you must make project for /textures/ folder to exist")
@@ -1110,12 +1122,13 @@ class SM64_F3D(DL):
                         "u8": [None, None],
                         "s16": [None, None],
                     },
+                    macro_check=self.props.version,
                 )
             )
             t.close()
 
-    # recursively parse the display list in order to return a bunch of model data
     def get_f3d_data_from_model(self, start: str, last_mat: SM64_Material = None, layer: int = None):
+        """recursively parse the display list in order to return a bunch of model data"""
         # inherit the mat based on the layer, or explicitly given one
         if last_mat:
             self.last_mat = last_mat
@@ -1130,95 +1143,11 @@ class SM64_F3D(DL):
         self.StartName = start
         return [self.Verts, self.Tris]
 
-    def apply_mesh_data(self, obj: bpy.types.Object, mesh: bpy.types.Mesh, layer: int, tex_path: Path):
-        bpy.context.view_layer.objects.active = obj
-        ind = -1
-        new = -1
-        UVmap = obj.data.uv_layers.new(name="UVMap")
-        # I can get the available enums for color attrs with this func
-        vcol_enums = GetEnums(bpy.types.FloatColorAttribute, "data_type")
-        # enums were changed in a blender version, this should future proof it a little
-        if "FLOAT_COLOR" in vcol_enums:
-            e = "FLOAT_COLOR"
-        else:
-            e = "COLOR"
-        Vcol = obj.data.color_attributes.get("Col")
-        if not Vcol:
-            Vcol = obj.data.color_attributes.new(name="Col", type=e, domain="CORNER")
-        Valph = obj.data.color_attributes.get("Alpha")
-        if not Valph:
-            Valph = obj.data.color_attributes.new(name="Alpha", type=e, domain="CORNER")
 
-        b_mesh = bmesh.new()
-        b_mesh.from_mesh(mesh)
-        tris = b_mesh.faces
-        tris.ensure_lookup_table()
-        uv_map = b_mesh.loops.layers.uv.active
-        v_color = b_mesh.loops.layers.float_color["Col"]
-        v_alpha = b_mesh.loops.layers.float_color["Alpha"]
-
-        self.Mats.append([len(tris), 0])
-        for i, t in enumerate(tris):
-            if i > self.Mats[ind + 1][0]:
-                new = self.create_new_f3d_mat(self.Mats[ind + 1][1], obj)
-                ind += 1
-                if not new:
-                    new = len(mesh.materials) - 1
-                    mat = mesh.materials[new]
-                    mat.name = "sm64 F3D Mat {} {}".format(obj.name, new)
-                    self.Mats[new][1].apply_material_settings(mat, self.Textures, tex_path, layer)
-                else:
-                    # I tried to re use mat slots but it is much slower, and not as accurate
-                    # idk if I was just doing it wrong or the search is that much slower, but this is easier
-                    mesh.materials.append(new)
-                    new = len(mesh.materials) - 1
-            # if somehow there is no material assigned to the triangle or something is lost
-            if new != -1:
-                self.apply_loop_data(new, mesh, t, uv_map, v_color, v_alpha)
-        b_mesh.to_mesh(mesh)
-
-    def apply_loop_data(self, mat: bpy.Types.Material, mesh: bpy.Types.Mesh, tri, uv_map, v_color, v_alpha):
-        tri.material_index = mat
-        # Get texture size or assume 32, 32 otherwise
-        i = mesh.materials[mat].f3d_mat.tex0.tex
-        if not i:
-            WH = (32, 32)
-        else:
-            WH = i.size
-        # Set UV data and Vertex Color Data
-        for v, l in zip(tri.verts, tri.loops):
-            uv = self.UVs[v.index]
-            vcol = self.VCs[v.index]
-            # scale verts
-            l[uv_map].uv = [a * (1 / (32 * b)) if b > 0 else a * 0.001 * 32 for a, b in zip(uv, WH)]
-            # idk why this is necessary. N64 thing or something?
-            if self.parsing_target == DataParser._binary_parsing:
-                flip = 1
-            else:
-                flip = -1
-            l[uv_map].uv[1] = l[uv_map].uv[1] * flip + 1
-            l[v_color] = [*gammaInverse([a / 255 for a in vcol]), 255]
-            l[v_alpha] = [vcol[3] / 255 for i in range(4)]
-
-    # create a new f3d_mat given an SM64_Material class but don't create copies with same props
-    def create_new_f3d_mat(self, mat: SM64_Material, obj: bpy.types.Object):
-        if not self.props.force_new_tex:
-            # check if this mat was used already in another mesh (or this mat if DL is suboptimal or something)
-            # even looping n^2 is probably faster than duping 3 mats with blender speed
-            for j, F3Dmat in enumerate(bpy.data.materials):
-                if F3Dmat.is_f3d:
-                    dupe = mat.mat_hash_f3d(F3Dmat.f3d_mat)
-                    if dupe:
-                        return F3Dmat
-        # make new mat
-        preset = getDefaultMaterialPreset("Shaded Solid")
-        createF3DMat(obj, preset)
-        return None
-
-
-# holds model found by geo
 @dataclass
 class ModelDat:
+    """holds model found by geo layout"""
+
     transform: Matrix
     layer: int
     model_name: str
@@ -1228,8 +1157,9 @@ class ModelDat:
     object: bpy.types.Object = None
 
 
-# base class for geo layouts and armatures
 class GraphNodes(DataParser):
+    """base DataParser class for geo layouts and geo armatures, sets up object hierarchy with proper transforms for model in blender based on sm64 geo layouts"""
+
     # class data
     _skipped_geo_asm_funcs = {
         "geo_movtex_pause_control",
@@ -1404,7 +1334,7 @@ class GraphNodes(DataParser):
                 "pass_linked_export",
             )
         for line in geo_layout:
-            if "GEO_ANIMATED_PART" in line:
+            if "GEO_ANIMATED_PART" in line or "GEO_SWITCH_CASE" in line:
                 name = f"Actor {layout_name}"
                 arm_obj = bpy.data.objects.new(name, bpy.data.armatures.new(name))
                 col.objects.link(arm_obj)
@@ -1466,7 +1396,7 @@ class GraphNodes(DataParser):
 
     @property
     def ordered_name(self) -> str:
-        return f"{self.get_parser(self.stream[-1]).head}_{self.name}"
+        return f"{self.get_parser(self.stream[-1]).head:04}_{self.name}"
 
     @property
     def first_obj(self) -> bpy.types.Object:
@@ -1777,7 +1707,7 @@ class GraphNodes(DataParser):
 
 class GeoLayout(GraphNodes):
     switch = "Switch"
-    translate_rotate = "Geo Translate/Rotat"
+    translate_rotate = "Geo Translate/Rotate"
     translate = "Geo Translate Node"
     rotate = "Geo Rotation Node"
     billboard = "Geo Billboard"
@@ -1786,7 +1716,6 @@ class GeoLayout(GraphNodes):
     asm = "Geo ASM"
     scale = "Geo Scale"
     animated_part = "Geo Translate Node"
-    custom_animated = "Custom"
     custom = "Custom"
 
     def __init__(
@@ -2015,6 +1944,7 @@ class GeoLayout(GraphNodes):
                 pass_args=self.pass_args,
             )
         GeoChild.parent_transform = self.last_transform
+        GeoChild.last_transform = self.last_transform
         GeoChild.parse_stream(self.get_new_stream(self.stream[-1]), self.stream[-1], depth + 1)
         self.children.append(GeoChild)
         return self._continue_parse
@@ -2034,8 +1964,7 @@ class GeoArmature(GraphNodes):
     scale = "Scale"
     render_area = "StartRenderArea"
     animated_part = "DisplayListWithOffset"
-    custom_animated = "CustomAnimated"
-    custom = "CustomNonAnimated"
+    custom = "Custom"
 
     def __init__(
         self,
@@ -2087,6 +2016,8 @@ class GeoArmature(GraphNodes):
             name = f"{self.ordered_name} switch_option"
             switch_armature = bpy.data.objects.new(name, bpy.data.armatures.new(name))
             self.col.objects.link(switch_armature)
+            # offset the location
+            switch_armature.location += Vector((2.0 * self.switch_index, 0, 0))
             self.switch_armatures[self.switch_index] = switch_armature
 
             self.enter_edit_mode(switch_armature)
@@ -2144,7 +2075,7 @@ class GeoArmature(GraphNodes):
         eb_name = edit_bone.name
         # give it a non zero length
         edit_bone.head = (0, 0, 0)
-        edit_bone.tail = (0, 0, 1)
+        edit_bone.tail = (0, 0, 0.1)
         # use self.switch_option_bone as parent, this does not logically follow from sm64 graph
         # but is due to fast64 rules, where switch option acts as "virtual" bone in between child and parent
         if self.switch_option_bone or self.parent_bone:
@@ -2195,9 +2126,10 @@ class GeoArmature(GraphNodes):
 
     # cmd not supported in fast64 for some reason?
     def GEO_RENDER_RANGE(self, macro: Macro, depth: int):
-        geo_bone = self.setup_geo_obj("render_range", self.custom)
-        geo_bone.fast64.sm64.custom_geo_cmd_macro = "GEO_RENDER_RANGE"
-        geo_bone.fast64.sm64.custom_geo_cmd_args = ",".join(macro.args[-2:])
+        # don't bother tbh
+        # geo_bone = self.setup_geo_obj("render_range", self.custom)
+        # geo_bone.fast64.sm64.custom.dl_command = "GEO_RENDER_RANGE"
+        # geo_bone.fast64.sm64.custom_geo_cmd_args = ",".join(macro.args[-2:])
         return self._continue_parse
 
     # can switch children have their own culling radius? does it have to
@@ -2278,6 +2210,7 @@ class GeoArmature(GraphNodes):
                 stream=self.stream,
             )
         GeoChild.parent_transform = self.last_transform
+        GeoChild.last_transform = self.last_transform
         GeoChild.parse_stream(self.get_new_stream(self.stream[-1]), self.stream[-1], depth + 1)
         self.children.append(GeoChild)
         return self._continue_parse
@@ -2287,18 +2220,25 @@ class GeoArmature(GraphNodes):
 #    Functions
 # ------------------------------------------------------------------------
 
+# Helper and pre processing funcs
 
-# parse aggregate files, and search for sm64 specific fast64 export name schemes
+
 def get_all_aggregates(aggregate_path: Path, filenames: tuple[callable], root_path: Path) -> list[Path]:
+    """parse aggregate files, and search for sm64 specific fast64 export name schemes"""
     if not aggregate_path or not aggregate_path.exists():
         return []
+    version = bpy.context.scene.fast64.sm64.importer.version
     with open(aggregate_path, "r", newline="") as file:
-        caught_files = parse_aggregate_file(file, filenames, root_path, aggregate_path)
+        caught_files = parse_aggregate_file(file, filenames, root_path, aggregate_path, macro_check=version)
         # catch fast64 includes
-        fast64 = parse_aggregate_file(file, (lambda path: "leveldata.inc.c" in path.name,), root_path, aggregate_path)
+        fast64 = parse_aggregate_file(
+            file, (lambda path: "leveldata.inc.c" in path.name,), root_path, aggregate_path, macro_check=version
+        )
         if fast64:
             with open(fast64[0], "r", newline="") as fast64_dat:
-                caught_files.extend(parse_aggregate_file(fast64_dat, filenames, root_path, aggregate_path))
+                caught_files.extend(
+                    parse_aggregate_file(fast64_dat, filenames, root_path, aggregate_path, macro_check=version)
+                )
     return caught_files
 
 
@@ -2318,8 +2258,9 @@ def get_and_check_rom(scene: bpy.types.Scene) -> filepathIO:
     return rom_path
 
 
-# given a rom, parse the level script
+# Level script functions
 def parse_level_script_binary(bin_file: BinaryIO, scene: bpy.types.Scene, col: bpy.types.Collection = None) -> Level:
+    """given a rom, parse the level script from the level script start and entering level importer_props.level_name"""
     root = bpy.data.objects.new("Empty", None)
     if not col:
         scene.collection.objects.link(root)
@@ -2341,8 +2282,8 @@ def parse_level_script_binary(bin_file: BinaryIO, scene: bpy.types.Scene, col: b
     return lvl
 
 
-# given a path, get a level object by parsing the script.c file
 def parse_level_script_c(script_files: list[Path], scene: bpy.types.Scene, col: bpy.types.Collection = None) -> Level:
+    """Given an aggregate scripts path, get a level object by parsing the script.c file from importer_props.entry"""
     props = scene.fast64.sm64.importer
     root = bpy.data.objects.new("Empty", None)
     if not col:
@@ -2356,7 +2297,9 @@ def parse_level_script_c(script_files: list[Path], scene: bpy.types.Scene, col: 
     scripts = dict()
     for script_file in script_files:
         with open(script_file, "r", newline="") as script_file:
-            scripts.update(get_data_types_from_file(script_file, {"LevelScript": ["(", ")"]}))
+            scripts.update(
+                get_data_types_from_file(script_file, {"LevelScript": ["(", ")"]}, macro_check=props.version)
+            )
     lvl = Level(scripts, scene, root, DataParser._c_parsing)
     entry = props.entry.format(props.level_name)
     try:
@@ -2367,7 +2310,6 @@ def parse_level_script_c(script_files: list[Path], scene: bpy.types.Scene, col: 
     return lvl
 
 
-# generate level object
 def parse_level_script(
     script_files: list[Path],
     decomp_path: Path,
@@ -2375,6 +2317,7 @@ def parse_level_script(
     scene: bpy.types.Scene,
     col: bpy.types.Collection = None,
 ) -> Level:
+    """generate level object given data containers (rom or aggregate script files)"""
     props = scene.fast64.sm64.importer
     if props.import_target == "C":
         return parse_level_script_c(
@@ -2386,13 +2329,214 @@ def parse_level_script(
             return parse_level_script_binary(bin_file, scene, col=col)
 
 
-# write the objects from a level object
 def write_level_objects(lvl: Level, col_name: str = None, actor_models: dict[model_name, bpy.Types.Mesh] = None):
     for area in lvl.areas.values():
         area.place_objects(col_name=col_name, actor_models=actor_models)
 
 
-# from a geo layout, create all the mesh's
+# Geo Layout functions
+def construct_geo_layouts_from_file(geo_paths: list[Path], root_path: Path) -> dict[geo_name:str, geo_data : list[str]]:
+    """given a list of aggregate geo.c file, return cleaned up geo layouts in a dict"""
+    geo_layout_files = []
+    for path in geo_paths:
+        geo_layout_files += get_all_aggregates(path, (lambda path: "geo.inc.c" in path.name,), root_path)
+    if not geo_layout_files:
+        return
+    # because of fast64, these can be recursively defined (though I expect only a depth of one)
+    for file in geo_layout_files:
+        geo_layout_files.extend(get_all_aggregates(file, (lambda path: "geo.inc.c" in path.name,), root_path))
+    geo_layout_data = {}  # stores cleaned up geo layout lines
+    for geo_file in geo_layout_files:
+        with open(geo_file, "r", newline="") as geo_file:
+            geo_layout_data.update(
+                get_data_types_from_file(
+                    geo_file, {"GeoLayout": ["(", ")"]}, macro_check=bpy.context.scene.fast64.sm64.importer.version
+                )
+            )
+    return geo_layout_data
+
+
+def find_actor_models_from_model_ids(
+    geo_paths: list[Path],
+    model_ids: list[str],
+    level: Level,
+    scene: bpy.types.Scene,
+    root_path: Path,
+    col: bpy.types.Collection = None,
+) -> dict[model_id, GeoLayout]:
+    """Parse geo_layouts with matching <model_ids> found in aggregate group_geo.c or level geo.c files"""
+    geo_layout_dict = construct_geo_layouts_from_file(geo_paths, root_path)
+    geo_layout_per_model: dict[model_id, GeoLayout] = dict()
+    for model in model_ids:
+        layout_name = level.loaded_geos.get(model, None)
+        if not layout_name:
+            # create a warning off of this somehow?
+            print(f"could not find model {model}")
+            continue
+        try:
+            geo_layout = GraphNodes.new_subclass_dyn_c(geo_layout_dict, scene, layout_name, col)
+            geo_layout_per_model[model] = geo_layout
+        except Exception as exc:
+            if exc.args[1] == "pass_linked_export":
+                print(exc)
+            else:
+                raise Exception(exc)
+    return geo_layout_per_model
+
+
+def find_actor_models_from_geo(
+    geo_paths: list[Path],
+    layout_name: str,
+    scene: bpy.types.Scene,
+    root_path: Path,
+    col: bpy.types.Collection = None,
+) -> GeoLayout:
+    """Parse geo_layout <layout_name> found within aggregate group_geo.c file or level geo.c"""
+    geo_layout_dict = construct_geo_layouts_from_file(geo_paths, root_path)
+    return GraphNodes.new_subclass_dyn_c(geo_layout_dict, scene, layout_name, col)
+
+
+def find_actor_models_binary(
+    bin_file: BinaryIO,
+    entry: int,
+    scene: bpy.types.Scene,
+    root_path: Path,
+    col: bpy.types.Collection = None,
+) -> GeoLayout:
+    """Parse geo_layout <layout_name> found at entry rom offset"""
+    return GraphNodes.new_subclass_dyn_bin(bin_file, scene, entry, col)
+
+
+def find_level_models_from_geo(
+    geo_paths: list[Path], lvl: Level, scene: bpy.types.Scene, root_path: Path, col_name: str = None
+) -> Level:
+    """Parse geo_layout based on area ptr found within aggregate group_geo.c file or level geo.c"""
+    props = scene.fast64.sm64.importer
+    geo_layout_dict = construct_geo_layouts_from_file(geo_paths, root_path)
+    for area_index, area in lvl.areas.items():
+        if col_name:
+            col = create_collection(area.root.users_collection[0], col_name)
+        else:
+            col = None
+        geo = GeoLayout(
+            geo_layout_dict, area.root, scene, f"GeoRoot {props.level_name} {area_index}", area.root, col=col
+        )
+        geo.parse_level_geo(area.geo)
+        area.geo_data = geo
+    return lvl
+
+
+def find_level_models_binary(lvl: Level, scene: bpy.types.Scene, root_path: Path, col_name: str = None) -> Level:
+    """Parse geo_layout based on area ptr found within rom_file"""
+    props = scene.fast64.sm64.importer
+    for area_index, area in lvl.areas.items():
+        lvl.load_segment_E(area_index)
+        lvl.update_geo_ptr(area_index)
+        if col_name:
+            col = create_collection(area.root.users_collection[0], col_name)
+        else:
+            col = None
+        geo = GeoLayout(
+            None,
+            area.root,
+            scene,
+            f"GeoRoot {props.level_name} {area_index}",
+            area.root,
+            col=col,
+            parse_target=DataParser._binary_parsing,
+        )
+        geo.bin_file = lvl.bin_file
+        try:
+            geo.parse_geo_from_start(area.geo, 0)
+        except Exception as exc:
+            if type(exc) is not ParseException:
+                raise exc
+        area.geo_data = geo
+    return lvl
+
+
+# F3d data functions
+def import_level_graphics(
+    geo_paths: list[Path],
+    lvl: Level,
+    scene: bpy.types.Scene,
+    root_path: Path,
+    aggregates: list[Path],
+    cleanup: bool = False,
+    col_name: str = None,
+) -> Level:
+    """import level graphics given aggregate geo.c and leveldata.c files, and a level object"""
+    if lvl.props.import_target == "C":
+        lvl = find_level_models_from_geo(geo_paths, lvl, scene, root_path, col_name=col_name)
+        models = construct_model_data_from_file(aggregates, scene, root_path)
+        # just a try, in case you are importing from something other than base decomp repo (like RM2C output folder)
+        try:
+            models.get_generic_textures(root_path)
+        except:
+            print("could not import genric textures, if this errors later from missing textures this may be why")
+    elif lvl.props.import_target == "Binary":
+        lvl = find_level_models_binary(lvl, scene, root_path, col_name=col_name)
+        # dummy f3d_gbi for class initialization
+        f3d_option = scene.f3d_type
+        scene.f3d_type = "F3D"
+        models = SM64_F3D(scene, DataParser._binary_parsing)
+        models.bin_file = lvl.bin_file
+        models.banks = lvl.banks
+        scene.f3d_type = f3d_option
+    lvl = write_level_to_bpy(lvl, scene, root_path, models, cleanup=cleanup)
+    return lvl
+
+
+def write_level_to_bpy(lvl: Level, scene: bpy.types.Scene, root_path: Path, f3d_dat: SM64_F3D, cleanup: bool = False):
+    """write the gfx for a level given the level data, parsed geolayout and gathered f3d data"""
+    for area_index, area in lvl.areas.items():
+        write_geo_to_bpy(area.geo_data, scene, f3d_dat, root_path, dict(), cleanup=cleanup)
+    return lvl
+
+
+def write_geo_to_bpy(
+    geo: GeoLayout,
+    scene: bpy.types.Scene,
+    f3d_dat: SM64_F3D,
+    root_path: Path,
+    meshes: dict[str, bpy.Types.Mesh],
+    cleanup: bool = True,
+) -> dict[str, bpy.Types.Mesh]:
+    """from a parsed geo layout, parse f3d data and create all the meshes"""
+    if geo.models:
+        # create a mesh for each one.
+        for model_data in geo.models:
+            name = f"{model_data.model_name} data"
+            layer = geo.parse_layer(model_data.layer)
+            if meshes and name in meshes.keys():
+                mesh = meshes[name]
+                name = 0
+            else:
+                mesh = bpy.data.meshes.new(name)
+                meshes[name] = mesh
+                [verts, tris] = f3d_dat.get_f3d_data_from_model(model_data.model_name, layer=layer)
+                # don't write empty models, delete empties with no children
+                # potential mat errors if used for DL setup but current importer should account for that using last_mat system
+                if tris:
+                    mesh.from_pydata(verts, [], tris)
+                elif not geo.children:
+                    bpy.data.objects.remove(model_data.object)
+                    model_data.object = None
+                    meshes.pop(name)
+                    continue
+
+            # swap out placeholder mesh data
+            model_data.object.data = mesh
+
+            if name:
+                apply_mesh_data(f3d_dat, model_data.object, mesh, str(layer), root_path, cleanup)
+    if not geo.children:
+        return meshes
+    for g in geo.children:
+        meshes = write_geo_to_bpy(g, scene, f3d_dat, root_path, meshes, cleanup=cleanup)
+    return meshes
+
+
 def write_armature_to_bpy(
     geo_armature: GeoArmature,
     scene: bpy.types.Scene,
@@ -2401,6 +2545,7 @@ def write_armature_to_bpy(
     parsed_model_data: dict[str, bpy.Types.Mesh],
     cleanup: bool = True,
 ):
+    """from a parsed geo armature, recurse armature and then join meshes to armature roots"""
     parsed_model_data = recurse_armature(geo_armature, scene, f3d_dat, root_path, parsed_model_data, cleanup=cleanup)
 
     def glob_models_in_arm(object_dict: dict, geo_armature: GeoArmature):
@@ -2419,38 +2564,19 @@ def write_armature_to_bpy(
 
     for armature_obj, objects in objects_by_armature.items():
         # I don't really know the specific override needed for this to work
-        override = {**bpy.context.copy(), "selected_editable_objects": objects, "active_object": objects[0]}
-        with bpy.context.temp_override(**override):
-            bpy.ops.object.join()
+        if len(objects) > 1:
+            override = {**bpy.context.copy(), "selected_editable_objects": objects, "active_object": objects[0]}
+            with bpy.context.temp_override(**override):
+                bpy.ops.object.join()
 
         obj = objects[0]
-        parentObject(armature_obj, obj)
-        obj.scale *= 1 / scene.fast64.sm64.blender_to_sm64_scale
-        rotate_object(-90, obj)
+        obj.location += armature_obj.location
+        parentObject(armature_obj, obj, keep=1)
         obj.ignore_collision = True
         # armature deform
         mod = obj.modifiers.new("deform", "ARMATURE")
         mod.object = geo_armature.armature
     return parsed_model_data
-
-
-def apply_mesh_data(
-    f3d_dat: SM64_F3D, obj: bpy.types.Object, mesh: bpy.types.Mesh, layer: int, root_path: Path, cleanup: bool = False
-):
-    f3d_dat.apply_mesh_data(obj, mesh, layer, root_path)
-    if cleanup:
-        mesh = obj.data
-        # clean up after applying dat
-        mesh.validate()
-        mesh.update(calc_edges=True)
-        # final operators to clean stuff up
-        # shade smooth
-        obj.select_set(True)
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.shade_smooth()
-        bpy.ops.object.mode_set(mode="EDIT")
-        bpy.ops.mesh.remove_doubles()
-        bpy.ops.object.mode_set(mode="OBJECT")
 
 
 def recurse_armature(
@@ -2461,6 +2587,7 @@ def recurse_armature(
     parsed_model_data: dict[str, bpy.Types.Mesh],
     cleanup: bool = True,
 ):
+    """from a parsed geo armature, parse f3d data and create meshes for armature"""
     if geo_armature.models:
         # create a mesh for each one
         for model_data in geo_armature.models:
@@ -2503,104 +2630,28 @@ def recurse_armature(
     return parsed_model_data
 
 
-# from a geo layout, create all the mesh's
-def write_geo_to_bpy(
-    geo: GeoLayout,
-    scene: bpy.types.Scene,
-    f3d_dat: SM64_F3D,
-    root_path: Path,
-    meshes: dict[str, bpy.Types.Mesh],
-    cleanup: bool = True,
-) -> dict[str, bpy.Types.Mesh]:
-    if geo.models:
-        # create a mesh for each one.
-        for model_data in geo.models:
-            name = f"{model_data.model_name} data"
-            layer = geo.parse_layer(model_data.layer)
-            if meshes and name in meshes.keys():
-                mesh = meshes[name]
-                name = 0
-            else:
-                mesh = bpy.data.meshes.new(name)
-                meshes[name] = mesh
-                [verts, tris] = f3d_dat.get_f3d_data_from_model(model_data.model_name, layer=layer)
-                # don't write empty models, delete empties with no children
-                # potential mat errors if used for DL setup but current importer should account for that using last_mat system
-                if tris:
-                    mesh.from_pydata(verts, [], tris)
-                elif not geo.children:
-                    bpy.data.objects.remove(model_data.object)
-                    model_data.object = None
-                    meshes.pop(name)
-                    continue
-
-            # swap out placeholder mesh data
-            model_data.object.data = mesh
-
-            if name:
-                apply_mesh_data(f3d_dat, model_data.object, mesh, str(layer), root_path, cleanup)
-    if not geo.children:
-        return meshes
-    for g in geo.children:
-        meshes = write_geo_to_bpy(g, scene, f3d_dat, root_path, meshes, cleanup=cleanup)
-    return meshes
+def apply_mesh_data(
+    f3d_dat: SM64_F3D, obj: bpy.types.Object, mesh: bpy.types.Mesh, layer: int, root_path: Path, cleanup: bool = False
+):
+    """apply the f3d material data to newly created mesh, textures, f3d mat props, vertex colors and UVs"""
+    f3d_dat.apply_mesh_data(obj, mesh, layer, root_path, f3d_dat.props.force_new_tex)
+    if cleanup:
+        mesh = obj.data
+        # clean up after applying dat
+        mesh.validate()
+        mesh.update(calc_edges=True)
+        # final operators to clean stuff up
+        # shade smooth
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.shade_smooth()
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.remove_doubles()
+        bpy.ops.object.mode_set(mode="OBJECT")
 
 
-# write the gfx for a level given the level data, and f3d data
-def write_level_to_bpy(lvl: Level, scene: bpy.types.Scene, root_path: Path, f3d_dat: SM64_F3D, cleanup: bool = False):
-    for area_index, area in lvl.areas.items():
-        write_geo_to_bpy(area.geo_data, scene, f3d_dat, root_path, dict(), cleanup=cleanup)
-    return lvl
-
-
-# given a geo.c file and a path, return cleaned up geo layouts in a dict
-def construct_geo_layouts_from_file(geo_paths: list[Path], root_path: Path) -> dict[geo_name:str, geo_data : list[str]]:
-    geo_layout_files = []
-    for path in geo_paths:
-        geo_layout_files += get_all_aggregates(path, (lambda path: "geo.inc.c" in path.name,), root_path)
-    if not geo_layout_files:
-        return
-    # because of fast64, these can be recursively defined (though I expect only a depth of one)
-    for file in geo_layout_files:
-        geo_layout_files.extend(get_all_aggregates(file, (lambda path: "geo.inc.c" in path.name,), root_path))
-    geo_layout_data = {}  # stores cleaned up geo layout lines
-    for geo_file in geo_layout_files:
-        with open(geo_file, "r", newline="") as geo_file:
-            geo_layout_data.update(get_data_types_from_file(geo_file, {"GeoLayout": ["(", ")"]}))
-    return geo_layout_data
-
-
-# get all the relevant data types cleaned up and organized for the f3d class
-def construct_sm64_f3d_data_from_file(gfx: SM64_F3D, model_file: TextIO) -> SM64_F3D:
-    gfx_dat = get_data_types_from_file(
-        model_file,
-        {
-            "Vtx": ["{", "}"],
-            "Gfx": ["(", ")"],
-            "Light_t": [None, None],
-            "Ambient_t": [None, None],
-            "Lights": [None, None],
-        },
-        collated=True,
-    )
-    for key, value in gfx_dat.items():
-        attr = getattr(gfx, key)
-        attr.update(value)
-    gfx.Textures.update(
-        get_data_types_from_file(
-            model_file,
-            {
-                "Texture": [None, None],
-                "u8": [None, None],
-                "s16": [None, None],
-            },
-        )
-    )
-    return gfx
-
-
-# Parse an aggregate group file or level data file for f3d data
 def construct_model_data_from_file(aggregates: list[Path], scene: bpy.types.Scene, root_path: Path) -> SM64_F3D:
+    """Parse a list of aggregate group.c leveldata.c files for f3d data and organize into F3D class"""
     model_files = []
     texture_files = []
     for dat_file in aggregates:
@@ -2639,158 +2690,95 @@ def construct_model_data_from_file(aggregates: list[Path], scene: bpy.types.Scen
                         "u8": [None, None],
                         "s16": [None, None],
                     },
+                    macro_check=sm64_f3d_data.props.version,
                 )
             )
     return sm64_f3d_data
 
 
-# Parse an aggregate group file or level data file for geo layouts corresponding to list of model IDs
-def find_actor_models_from_model_ids(
-    geo_paths: list[Path],
-    model_ids: list[str],
-    level: Level,
-    scene: bpy.types.Scene,
-    root_path: Path,
-    col: bpy.types.Collection = None,
-) -> dict[model_id, GeoLayout]:
-    geo_layout_dict = construct_geo_layouts_from_file(geo_paths, root_path)
-    geo_layout_per_model: dict[model_id, GeoLayout] = dict()
-    for model in model_ids:
-        layout_name = level.loaded_geos.get(model, None)
-        if not layout_name:
-            # create a warning off of this somehow?
-            print(f"could not find model {model}")
-            continue
-        try:
-            geo_layout = GraphNodes.new_subclass_dyn_c(geo_layout_dict, scene, layout_name, col)
-            geo_layout_per_model[model] = geo_layout
-        except Exception as exc:
-            if exc.args[1] == "pass_linked_export":
-                print(exc)
-            else:
-                raise Exception(exc)
-    return geo_layout_per_model
-
-
-# Parse an aggregate group file or level data file for geo layouts
-def find_actor_models_from_geo(
-    geo_paths: list[Path],
-    layout_name: str,
-    scene: bpy.types.Scene,
-    root_path: Path,
-    col: bpy.types.Collection = None,
-) -> GeoLayout:
-    geo_layout_dict = construct_geo_layouts_from_file(geo_paths, root_path)
-    return GraphNodes.new_subclass_dyn_c(geo_layout_dict, scene, layout_name, col)
-
-
-# Parse an aggregate group file or level data file for geo layouts
-def find_actor_models_binary(
-    bin_file: BinaryIO,
-    entry: int,
-    scene: bpy.types.Scene,
-    root_path: Path,
-    col: bpy.types.Collection = None,
-) -> GeoLayout:
-    return GraphNodes.new_subclass_dyn_bin(bin_file, scene, entry, col)
-
-
-# Find DL references given a level geo file and a path to a level folder
-def find_level_models_from_geo(
-    geo_paths: list[Path], lvl: Level, scene: bpy.types.Scene, root_path: Path, col_name: str = None
-) -> Level:
-    props = scene.fast64.sm64.importer
-    geo_layout_dict = construct_geo_layouts_from_file(geo_paths, root_path)
-    for area_index, area in lvl.areas.items():
-        if col_name:
-            col = create_collection(area.root.users_collection[0], col_name)
-        else:
-            col = None
-        geo = GeoLayout(
-            geo_layout_dict, area.root, scene, f"GeoRoot {props.level_name} {area_index}", area.root, col=col
+def construct_sm64_f3d_data_from_file(gfx: SM64_F3D, model_file: TextIO) -> SM64_F3D:
+    """Update F3D class with all the relevant data types cleaned up and organized into appropriate attributes"""
+    gfx_dat = get_data_types_from_file(
+        model_file,
+        {
+            "Vtx": ["{", "}"],
+            "Gfx": ["(", ")"],
+            "Light_t": [None, None],
+            "Ambient_t": [None, None],
+            "Lights": [None, None],
+        },
+        macro_check=gfx.props.version,
+        collated=True,
+    )
+    for key, value in gfx_dat.items():
+        attr = getattr(gfx, key)
+        attr.update(value)
+    gfx.Textures.update(
+        get_data_types_from_file(
+            model_file,
+            {
+                "Texture": [None, None],
+                "u8": [None, None],
+                "s16": [None, None],
+            },
+            macro_check=gfx.props.version,
         )
-        geo.parse_level_geo(area.geo)
-        area.geo_data = geo
-    return lvl
+    )
+    return gfx
 
 
-def find_level_models_binary(lvl: Level, scene: bpy.types.Scene, root_path: Path, col_name: str = None) -> Level:
-    props = scene.fast64.sm64.importer
-    for area_index, area in lvl.areas.items():
-        lvl.load_segment_E(area_index)
-        lvl.update_geo_ptr(area_index)
-        if col_name:
-            col = create_collection(area.root.users_collection[0], col_name)
-        else:
-            col = None
-        geo = GeoLayout(
-            None,
-            area.root,
-            scene,
-            f"GeoRoot {props.level_name} {area_index}",
-            area.root,
-            col=col,
-            parse_target=DataParser._binary_parsing,
-        )
-        geo.bin_file = lvl.bin_file
-        try:
-            geo.parse_geo_from_start(area.geo, 0)
-        except Exception as exc:
-            if type(exc) is not ParseException:
-                raise exc
-        area.geo_data = geo
-    return lvl
-
-
-# import level graphics given geo.c file, and a level object
-def import_level_graphics(
-    geo_paths: list[Path],
+# Collision functions
+def import_level_collision(
+    aggregate: Path,
     lvl: Level,
     scene: bpy.types.Scene,
     root_path: Path,
-    aggregates: list[Path],
-    cleanup: bool = False,
+    cleanup: bool,
     col_name: str = None,
 ) -> Level:
+    """import level collision given a level script"""
     if lvl.props.import_target == "C":
-        lvl = find_level_models_from_geo(geo_paths, lvl, scene, root_path, col_name=col_name)
-        models = construct_model_data_from_file(aggregates, scene, root_path)
-        # just a try, in case you are importing from something other than base decomp repo (like RM2C output folder)
-        try:
-            models.get_generic_textures(root_path)
-        except:
-            print("could not import genric textures, if this errors later from missing textures this may be why")
-    elif lvl.props.import_target == "Binary":
-        lvl = find_level_models_binary(lvl, scene, root_path, col_name=col_name)
-        # dummy f3d_gbi for class initialization
-        f3d_option = scene.f3d_type
-        scene.f3d_type = "F3D"
-        models = SM64_F3D(scene, DataParser._binary_parsing)
-        models.bin_file = lvl.bin_file
-        models.banks = lvl.banks
-        scene.f3d_type = f3d_option
-    lvl = write_level_to_bpy(lvl, scene, root_path, models, cleanup=cleanup)
+        lvl = find_collision_data_from_path(
+            aggregate, lvl, scene, root_path
+        )  # Now Each area has its collision file nicely formatted
+    # in binary, the collision is at the bin_file, area.terrain ptr
+    write_level_collision_to_bpy(lvl, scene, cleanup, col_name=col_name)
     return lvl
 
 
-# get all the collision data from a certain path
-def find_collision_data_from_path(aggregate: Path, lvl: Level, scene: bpy.types.Scene, root_path: Path) -> Level:
-    collision_files = get_all_aggregates(aggregate, (lambda path: "collision.inc.c" in path.name,), root_path)
-    col_data = dict()
-    for col_file in collision_files:
-        if not os.path.isfile(col_file):
-            continue
-        with open(col_file, "r", newline="") as col_file:
-            col_data.update(get_data_types_from_file(col_file, {"Collision": ["(", ")"]}))
-    # search for the area terrain from available collision data
-    for area in lvl.areas.values():
-        area.col_file = col_data.get(area.terrain, None)
-        if not area.col_file:
-            props = scene.fast64.sm64.importer
-            raise Exception(
-                f"Collision {area.terrain} not found in levels/{props.level_name}/{props.level_prefix}leveldata.c"
-            )
-    return lvl
+def import_actor_collision(
+    aggregate: Path,
+    props: SM64_ImportProperties,
+    bin_file: BinaryIO,
+    scene: bpy.types.Scene,
+    col_ptr: Union[int, str],
+    root_path: Path,
+    cleanup: bool,
+    col: bpy.types.Collection,
+) -> Level:
+    """import level collision given a level script"""
+    if props.import_target == "C":
+        collision_files = []
+        for agg_path in aggregate:
+            collision_files += get_all_aggregates(agg_path, (lambda path: "collision.inc.c" in path.name,), root_path)
+        col_data = dict()
+        for col_file in collision_files:
+            if not os.path.isfile(col_file):
+                continue
+            with open(col_file, "r", newline="") as col_file:
+                col_data.update(
+                    get_data_types_from_file(col_file, {"Collision": ["(", ")"]}, macro_check=props.version)
+                )
+        # search for the area terrain from available collision data
+        col_file = col_data.get(col_ptr, None)
+        if not col_file:
+            raise Exception(f"Collision {col_ptr} not found")
+    else:
+        col_file = col_ptr
+    root_obj = bpy.data.objects.new(f"col obj {col_ptr}", None)
+    col.objects.link(root_obj)
+    # in binary, the collision is at the bin_file, area.terrain ptr
+    write_collision_to_bpy(props, bin_file, scene, col_file, root_obj, f"col obj {col_ptr}", cleanup, col)
 
 
 def write_level_collision_to_bpy(
@@ -2800,53 +2788,82 @@ def write_level_collision_to_bpy(
     col_name: str = None,
     actor_models: dict[model_name, bpy.Types.Mesh] = None,
 ):
+    """Write level collision data to blender given parsed collision file"""
     for area_index, area in lvl.areas.items():
-        lvl.load_segment_E(area_index)
-        lvl.update_col_ptr(area_index)
+        if lvl.props.import_target == "Binary":
+            lvl.load_segment_E(area_index)
+            lvl.update_col_ptr(area_index)
         if not col_name:
             col = area.root.users_collection[0]
         else:
             col = create_collection(area.root.users_collection[0], col_name)
-        col_parser = Collision(area.col_file, scene.fast64.sm64.blender_to_sm64_scale)
-        if lvl.props.import_target == "C":
-            col_parser.parse_collision()
-        else:
-            try:
-                col_parser.parse_collision_binary(lvl.bin_file, area.terrain)
-            except Exception as exc:
-                if type(exc) is not ParseException:
-                    raise exc
-        name = "SM64 {} Area {} Col".format(scene.fast64.sm64.importer.level_name, area_index)
-        obj = col_parser.write_collision(scene, name, area.root, col)
+        col_parser = write_collision_to_bpy(
+            lvl.props,
+            lvl.bin_file,
+            scene,
+            area.col_file,
+            area.root,
+            "SM64 {} Area {} Col".format(lvl.props.level_name, area_index),
+            cleanup,
+            col,
+        )
         area.write_special_objects(col_parser.special_objects, col)
-        # final operators to clean stuff up
-        if cleanup:
-            obj.data.validate()
-            obj.data.update(calc_edges=True)
-            # shade smooth
-            obj.select_set(True)
-            bpy.context.view_layer.objects.active = obj
-            bpy.ops.object.shade_smooth()
-            bpy.ops.object.mode_set(mode="EDIT")
-            bpy.ops.mesh.remove_doubles()
-            bpy.ops.object.mode_set(mode="OBJECT")
 
 
-# import level collision given a level script
-def import_level_collision(
-    aggregate: Path,
-    lvl: Level,
+def write_collision_to_bpy(
+    props: SM64_ImportProperties,
+    bin_file: BinaryIO,
     scene: bpy.types.Scene,
-    root_path: Path,
+    col_ptr: Union[int, CDataArray],
+    root_obj: bpy.types.Object,
+    name: str,
     cleanup: bool,
-    col_name: str = None,
-) -> Level:
-    if lvl.props.import_target == "C":
-        lvl = find_collision_data_from_path(
-            aggregate, lvl, scene, root_path
-        )  # Now Each area has its collision file nicely formatted
-    # in binary, the collision is at the bin_file, area.terrain ptr
-    write_level_collision_to_bpy(lvl, scene, cleanup, col_name=col_name)
+    col: bpy.types.Collection,
+):
+    """Write level collision data to blender given parsed collision file"""
+    col_parser = Collision(col_ptr, scene.fast64.sm64.blender_to_sm64_scale)
+    if props.import_target == "C":
+        col_parser.parse_collision()
+    else:
+        try:
+            col_parser.parse_collision_binary(bin_file, col_ptr)
+        except Exception as exc:
+            if type(exc) is not ParseException:
+                raise exc
+    obj = col_parser.write_collision(scene, name, root_obj, col)
+    # final operators to clean stuff up
+    if cleanup:
+        obj.data.validate()
+        obj.data.update(calc_edges=True)
+        # shade smooth
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.shade_smooth()
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.remove_doubles()
+        bpy.ops.object.mode_set(mode="OBJECT")
+    return col_parser
+
+
+def find_collision_data_from_path(aggregate: Path, lvl: Level, scene: bpy.types.Scene, root_path: Path) -> Level:
+    """Parse collision data given an aggregate leveldata.c or group.c file"""
+    collision_files = get_all_aggregates(aggregate, (lambda path: "collision.inc.c" in path.name,), root_path)
+    col_data = dict()
+    for col_file in collision_files:
+        if not os.path.isfile(col_file):
+            continue
+        with open(col_file, "r", newline="") as col_file:
+            col_data.update(
+                get_data_types_from_file(col_file, {"Collision": ["(", ")"]}, macro_check=lvl.props.version)
+            )
+    # search for the area terrain from available collision data
+    for area in lvl.areas.values():
+        area.col_file = col_data.get(area.terrain, None)
+        if not area.col_file:
+            props = scene.fast64.sm64.importer
+            raise Exception(
+                f"Collision {area.terrain} not found in levels/{props.level_name}/{props.level_prefix}leveldata.c"
+            )
     return lvl
 
 
@@ -2873,16 +2890,29 @@ class SM64_ActImport(Operator):
         group_prefix = props.group_prefix
         level_name = props.level_name
         level_prefix = props.level_prefix
+
+        # add in common actor paths for actors that use stars or mario hat
         geo_paths = (
             decomp_path / "actors" / (group_prefix + "_geo.c"),
+            decomp_path / "actors" / "common0_geo.c",
+            decomp_path / "actors" / "common1_geo.c",
+            decomp_path / "actors" / "group0_geo.c",
             decomp_path / "levels" / level_name / (level_prefix + "geo.c"),
         )
         model_data_paths = (
             decomp_path / "actors" / (group_prefix + ".c"),
+            decomp_path / "actors" / "common0.c",
+            decomp_path / "actors" / "common1.c",
+            decomp_path / "actors" / "group0.c",
             decomp_path / "levels" / level_name / (level_prefix + "leveldata.c"),
         )
 
         if props.import_target == "C":
+            # check if actor has collision data
+            if props.col_data:
+                import_actor_collision(
+                    model_data_paths, props, None, scene, props.col_data, decomp_path, self.cleanup, rt_col
+                )
             geo_layout = find_actor_models_from_geo(
                 geo_paths, props.geo_layout, scene, decomp_path, col=rt_col
             )  # return geo layout class and write the geo layout
@@ -2890,6 +2920,18 @@ class SM64_ActImport(Operator):
         elif props.import_target == "Binary":
             # levels need to be parsed to get the rom bank loads, choose level object is used in
             lvl = parse_level_script(None, None, rom_path, scene, rt_col)
+            # check if actor has collision data
+            if props.col_data:
+                import_actor_collision(
+                    model_data_paths,
+                    props,
+                    lvl.bin_file,
+                    scene,
+                    lvl.seg2phys(props.col_data),
+                    decomp_path,
+                    self.cleanup,
+                    rt_col,
+                )
             entry = lvl.seg2phys(props.geo_layout_binary)
             geo_layout = find_actor_models_binary(
                 lvl.bin_file, entry, scene, decomp_path, col=rt_col
@@ -3269,17 +3311,31 @@ class SM64_ImportProperties(PropertyGroup):
         else:
             preset_full = self.get_actor_preset()
             model_info = preset_full.get_model_info(self.actor_preset)
-            return convert_addr_to_func(f"{model_info.geolayout:08x}")
+            return convert_addr_to_func(f"{model_info.geolayout:08x}", self.actor_preset.replace(" ", "_").lower())
 
     @property
     def geo_layout_binary(self):
         if self.actor_preset == "Custom":
-            convert_addr_to_func(self.custom_geo_layout_addr)
             return self.custom_geo_layout_str
         else:
             preset_full = self.get_actor_preset()
             model_info = preset_full.get_model_info(self.actor_preset)
             return model_info.geolayout
+
+    @property
+    def col_data(self):
+        if self.actor_preset == "Custom":
+            return None
+            # return self.custom_geo_layout_str
+        else:
+            preset_full = self.get_actor_preset()
+            col_info = preset_full.get_collision_info(self.actor_preset)
+            if not col_info:
+                return None
+            if self.import_target == "C":
+                return col_info.c_name
+            else:
+                return col_info.address
 
     def draw_actor(self, layout: bpy.types.UILayout):
         box = layout.box()

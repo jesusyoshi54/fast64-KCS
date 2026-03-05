@@ -410,7 +410,7 @@ def set_game_defaults(scene: bpy.types.Scene, set_ucode=True):
         f3d_type = "F3D"
         world_defaults = sm64_world_defaults
     elif scene.gameEditorMode in {"MK64", "BK64"}:
-        f3d_type = "F3DEX"
+        f3d_type = "F3DEX/LX"
         world_defaults = mk64_world_defaults
     elif scene.gameEditorMode in {"OOT", "MM"}:
         f3d_type = "F3DEX2/LX2"

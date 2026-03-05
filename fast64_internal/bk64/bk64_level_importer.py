@@ -24,6 +24,9 @@ from bpy.types import (
 from bpy.utils import register_class, unregister_class
 from mathutils import Vector, Euler, Matrix, Quaternion
 
+import cProfile, pstats, io
+from pstats import SortKey
+
 import os, sys, struct, shutil, math, re
 from pathlib import Path
 from collections import namedtuple
@@ -34,7 +37,7 @@ from collections.abc import Sequence
 from ..f3d.f3d_gbi import DPSetRenderMode, SPEndDisplayList
 from ..f3d.f3d_import import *
 from ..utility_importer import *
-from ..utility import parentObject
+from ..utility import parentObject, rotate_object
 from ..panels import BK64_Panel
 
 # -------------------------------------------------------------------------------
@@ -133,11 +136,15 @@ class GeoLayout(DataParser, BinWrite):
         child2_co: tuple[float]
         flag: int
         child1_off: int
+        pad1: int
         child2_off: int
+        pad2: int
 
     def cmd_1(self, start: int):
-        data = self.unpack_type(start, ">L6fH2L")
+        data = self.unpack_type(start, ">L6fH4H")
         self.data = self._cmd_sort("CMD_SORT", data[0], data[1:4], data[4:7], *data[7:])
+        if data[8]:
+            self.child_geo_offset = [data[8], data[10]]
         return data[0]
 
     @dataclass
@@ -405,7 +412,7 @@ class ModelBin(DataParser):
         cmd_type: int
         cmd_data: list[int | float]
 
-    def __init__(self, bin_file, model_type: str, ptr=None):
+    def __init__(self, bin_file, model_type: str, name: str = "", ptr=None):
         self.bin_file = bin_file
         self.model_type = model_type
         self.ptrs = ptr
@@ -423,8 +430,11 @@ class ModelBin(DataParser):
         self.f3d.banks = BankLoads()
         self.get_banks()
         render_mode_table = self.get_render_modes(self.f3d.f3d_gbi)
+        self.setup_material_base()
         self.f3d.bin_file = self.bin_file
         self.f3d.init_stream()
+        self.f3d.last_mat.name = name
+        self.name = name
 
     def get_banks(self):
         # seg 1 is verts, seg 2 textures, seg 3 render mode table, seg 11-15 animated textures
@@ -501,6 +511,44 @@ class ModelBin(DataParser):
         self.tex_data_start = self.tex_header.tex_cnt * 0x10 + 8 + self.main_header.tex_list
         # extract textures I guess
 
+    def setup_material_base(self):
+        """Based on modelbin geo mode, setup base material settings"""
+        # idk what the base stuff is currently but I'll add as time goes on
+        mat = self.f3d.last_mat
+        mat.other_mode["g_mdsft_cycletype"] = "G_CYC_2CYCLE"
+        # mip mapping, not sure if it's this type
+        if self.main_header.geo_type & 2:
+            mat.other_mode["g_mdsft_textdetail"] = "G_TD_DETAIL"
+        # env mapping, not sure how that is used
+        # if self.main_header.geo_type & 4:
+        #     mat.other_mode["g_mdsft_textdetail"] = "G_TD_DETAIL"
+
+    def write_textures(self):
+        # fmt, siz
+        tex_types = {
+                1: ("G_IM_FMT_CI", "G_IM_SIZ_4"),
+                2: ("G_IM_FMT_CI", "G_IM_SIZ_8"),
+                4: ("G_IM_FMT_RGBA", "G_IM_SIZ_16"),
+                8: ("G_IM_FMT_RGBA", "G_IM_SIZ_32"),
+                0x10: ("G_IM_FMT_IA", "G_IM_SIZ_8"),
+        }
+        mat = self.f3d.last_mat
+        for meta_tex in self.meta_tex_data:
+            # if CI, pal is at the offset start
+            if meta_tex.tex_type == 1:
+                pal = Texture(meta_tex.tex_offset + self.tex_data_start, "G_IM_FMT_RGBA", "G_IM_SIZ_16", 16, 1)
+                pal_off = 0x20
+            elif meta_tex.tex_type == 2:
+                pal = Texture(meta_tex.tex_offset + self.tex_data_start, "G_IM_FMT_RGBA", "G_IM_SIZ_16", 256, 1)
+                pal_off = 0x200
+            else:
+                pal_off = 0
+                pal = None
+            tex = Texture(pal_off + meta_tex.tex_offset + self.tex_data_start, *tex_types.get(meta_tex.tex_type), meta_tex.width, meta_tex.height)
+            mat.pal = pal
+            mat.load_texture_array(0, dict(), tex, DataParser._binary_parsing)
+            mat.pal = None
+
     def get_dl_list(self):
         start = self.main_header.dl_list
         self.dl_cmd_cnt = self.unpack_type(start, ">L")
@@ -553,12 +601,15 @@ class ModelBin(DataParser):
             geo = GeoLayout(offset, self.bin_file)
             geo_container.append(geo)
             if geo.child_geo_offset:
-                self.parse_geo(offset + geo.child_geo_offset, geo.child_geos)
+                if type(geo.child_geo_offset) is list:
+                    [self.parse_geo(offset + geo_off, geo.child_geos) for geo_off in geo.child_geo_offset]
+                else:
+                    self.parse_geo(offset + geo.child_geo_offset, geo.child_geos)
             offset += geo.length
 
     # after parsing the necessary basic data, loop through the geo layouts to find all the DLs then write them out
     def write_geos(self, geo_container: list[GeoLayout]):
-        for geo in geo_container:
+        for i, geo in enumerate(geo_container):
             # there are too many small DLs...imports take forever
             if geo.data.cmd_name == "CMD_LOAD_DL":
                 # geo_obj = geo.parse_cmd(root)
@@ -574,6 +625,8 @@ class ModelBin(DataParser):
                 #     return
             if geo.child_geos:
                 self.write_geos(geo.child_geos)
+            # if i > 40:
+            #     return
 
     def parse_dl(self, start: int):
         start = self.main_header.dl_list + start * 8 + 8
@@ -587,6 +640,7 @@ class ModelBin(DataParser):
         mesh.from_pydata(self.f3d.Verts, [], self.f3d.Tris)
         self.f3d.apply_mesh_data(geo_obj, mesh, 0, None)
         geo_obj.scale = [1 / 500, 1 / 500, 1 / 500]
+        rotate_object(-90, geo_obj)
 
     # no purpose in using this but I'll leave it for refernce
     def write(self, fileIO):
@@ -614,7 +668,7 @@ class ModelBin(DataParser):
 
 def get_models(decomp_path: Path):
     map_models = open(decomp_path / Path("src/core2/mapModel.c"), "r")
-    models = get_enum_struct_data_from_file(map_models, {"MapModelDescription": ["{", "}"]})["D_8036ABE0"]
+    models = get_data_types_from_file(map_models, {"MapModelDescription": ["{", "}"]}, "")["D_8036ABE0"]
     map_models = []
     for line in models:
         line = line.replace("{", "").replace("}", "").split(",")
@@ -631,7 +685,7 @@ def get_models(decomp_path: Path):
 # do I really even need this?
 def get_enums(decomp_path: Path):
     enums_file = open(decomp_path / Path("include/enums.h"), "r")
-    enums = get_enum_struct_data_from_file(enums_file, {"enum": [None, None]})
+    enums = get_data_types_from_file(enums_file, {"enum": [None, None]}, "")
     return enums
 
 
@@ -641,27 +695,33 @@ def extract_model(decomp_path: Path, map_model: MapModelDescription, scene: bpy.
     with open(opa_model_id, "rb") as bin_file:
         bin_file = bin_file.read()
         # map_model.get_opa_asset_num()
-        block = ModelBin(bin_file, "opa")
+        opa_block = ModelBin(bin_file, "opa", map_model.get_opa_asset_num())
         lvl_root = bpy.data.objects.new("Empty", None)
         lvl_root.name = f"{map_model.get_opa_asset_num()}.model.bin"
         lvl_root.fast64.bk64.obj_type = "Level Root"
         col = scene.collection
         col.objects.link(lvl_root)
-        block.write_geos(block.geo_cmds)
-        block.write_model(lvl_root, col)
+        opa_block.write_textures()
+        opa_block.write_geos(opa_block.geo_cmds)
+        opa_block.write_model(lvl_root, col)
     # xlu model
     xlu_model_id = decomp_path / Path("assets/model") / f"{map_model.get_xlu_asset_num()}.model.bin"
     with open(xlu_model_id, "rb") as bin_file:
         bin_file = bin_file.read()
-        # map_model.get_xlu_asset_num()
-        block = ModelBin(bin_file, "xlu")
+        map_model.get_xlu_asset_num()
+        xlu_block = ModelBin(bin_file, "xlu", map_model.get_xlu_asset_num())
         lvl_root = bpy.data.objects.new("Empty", None)
         lvl_root.name = f"{map_model.get_xlu_asset_num()}.model.bin"
         lvl_root.fast64.bk64.obj_type = "Level Root"
         col = scene.collection
         col.objects.link(lvl_root)
-        block.write_geos(block.geo_cmds)
-        block.write_model(lvl_root, col)
+        # inherit mats and f3d stream from opa block, but don't inherit name or bin_file
+        xlu_block.f3d.last_mat = opa_block.f3d.last_mat
+        xlu_block.f3d.last_mat.name = map_model.get_xlu_asset_num()
+        xlu_block.f3d.last_mat.bin_file = bin_file
+        xlu_block.write_textures()
+        xlu_block.write_geos(xlu_block.geo_cmds)
+        xlu_block.write_model(lvl_root, col)
 
 
 # ------------------------------------------------------------------------
@@ -674,6 +734,9 @@ class BK64_LevelImport(Operator):
     bl_idname = "wm.bk64_import_level"
 
     def execute(self, context):
+        pr = cProfile.Profile()
+        pr.enable()
+
         scene = context.scene
         props = scene.fast64.bk64.importer
 
@@ -687,6 +750,13 @@ class BK64_LevelImport(Operator):
         model_list = get_models(decomp_path)
         enums = get_enums(decomp_path)
         extract_model(decomp_path, model_list[0], scene)
+
+        pr.disable()
+        s = io.StringIO()
+        sortby = SortKey.CUMULATIVE
+        ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
+        ps.print_stats(20)
+        print(s.getvalue())
         return {"FINISHED"}
 
 
